@@ -66,14 +66,14 @@ class CameraStreamWithLCD:
             
             # Choose resolution based on what's needed
             if self.web_streaming:
-                # Higher resolution for web streaming
+                # Higher resolution for web streaming - match original format
                 config = self.picam2.create_preview_configuration(
-                    main={"size": (640, 480), "format": "RGB888"}
+                    main={"size": (640, 480)}
                 )
             else:
-                # LCD-only mode: use 128x128 like original main.py (no resizing needed!)
+                # LCD-only mode: use 128x128 like original main.py (no format specified!)
                 config = self.picam2.create_preview_configuration(
-                    main={"size": (128, 128), "format": "RGB888"}
+                    main={"size": (128, 128)}
                 )
                 
             self.picam2.configure(config)
