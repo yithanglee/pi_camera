@@ -173,6 +173,7 @@ class CameraStreamWithLCD:
                 
     def generate_frames(self):
         """Generate frames for MJPEG web streaming"""
+        frame_count = 0
         while self.web_streaming and self.streaming:
             with self.lock:
                 if self.picam2:
@@ -189,11 +190,44 @@ class CameraStreamWithLCD:
                         img_io.seek(0)
                         frame_bytes = img_io.read()
                         
+                        frame_count += 1
+                        if frame_count % 30 == 0:  # Log every 30 frames
+                            print(f"Web streaming: frame {frame_count}, size: {image.size}")
+                        
                         yield (b'--frame\r\n'
                                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                     except Exception as e:
                         print(f"Frame generation error: {e}")
-                        break
+                        # Yield an error frame instead of breaking
+                        error_image = Image.new('RGB', (640, 480), color='yellow')
+                        draw = ImageDraw.Draw(error_image)
+                        draw.text((200, 220), "Frame Error:", fill='black')
+                        draw.text((200, 240), str(e)[:40], fill='black')
+                        
+                        img_io = io.BytesIO()
+                        error_image.save(img_io, 'JPEG')
+                        img_io.seek(0)
+                        error_bytes = img_io.read()
+                        
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + error_bytes + b'\r\n')
+                        time.sleep(1)  # Wait before retrying
+                else:
+                    print("Warning: picam2 object is None in generate_frames")
+                    # Generate a "no camera" frame
+                    no_camera_image = Image.new('RGB', (640, 480), color='blue')
+                    draw = ImageDraw.Draw(no_camera_image)
+                    draw.text((250, 220), "No Camera Object", fill='white')
+                    draw.text((250, 240), "Check camera state", fill='white')
+                    
+                    img_io = io.BytesIO()
+                    no_camera_image.save(img_io, 'JPEG')
+                    img_io.seek(0)
+                    no_camera_bytes = img_io.read()
+                    
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + no_camera_bytes + b'\r\n')
+                    time.sleep(1)  # Wait before retrying
                         
             time.sleep(0.033)  # ~30 FPS for web
             
@@ -243,14 +277,33 @@ def index():
 @app.route('/video_feed')
 def video_feed():
     """Video streaming route"""
-    if camera_stream.streaming:
-        return Response(camera_stream.generate_frames(),
-                       mimetype='multipart/x-mixed-replace; boundary=frame')
+    if camera_stream.streaming and camera_stream.web_streaming:
+        try:
+            return Response(camera_stream.generate_frames(),
+                           mimetype='multipart/x-mixed-replace; boundary=frame')
+        except Exception as e:
+            # If there's an error with streaming, return an error image
+            error_image = Image.new('RGB', (640, 480), color='red')
+            draw = ImageDraw.Draw(error_image)
+            draw.text((200, 220), f"Streaming Error:", fill='white')
+            draw.text((200, 240), str(e)[:50], fill='white')
+            
+            img_io = io.BytesIO()
+            error_image.save(img_io, 'JPEG')
+            img_io.seek(0)
+            
+            return Response(img_io.read(), mimetype='image/jpeg')
     else:
         # Return a placeholder image when not streaming
         placeholder = Image.new('RGB', (640, 480), color='black')
         draw = ImageDraw.Draw(placeholder)
-        draw.text((250, 220), "Camera Not Active", fill='white')
+        if not camera_stream.streaming:
+            draw.text((250, 220), "Camera Stream Not Started", fill='white')
+            draw.text((280, 240), "Press KEY1 to start", fill='white')
+        elif not camera_stream.web_streaming:
+            draw.text((250, 220), "Web Streaming Disabled", fill='white')
+        else:
+            draw.text((250, 220), "Camera Not Active", fill='white')
         
         img_io = io.BytesIO()
         placeholder.save(img_io, 'JPEG')
@@ -280,12 +333,59 @@ def stop_stream():
 @app.route('/status')
 def status():
     """Get streaming status"""
+    camera_active = False
+    camera_info = "No camera"
+    
+    # Better camera state detection
+    if camera_stream.picam2 is not None:
+        try:
+            # Try to get camera info to verify it's actually working
+            camera_active = True
+            camera_info = "Active"
+        except Exception as e:
+            camera_info = f"Error: {str(e)}"
+            camera_active = False
+    
     return jsonify({
         "streaming": camera_stream.streaming,
         "lcd_streaming": camera_stream.lcd_streaming,
         "web_streaming": camera_stream.web_streaming,
-        "camera_active": camera_stream.picam2 is not None
+        "camera_active": camera_active,
+        "camera_info": camera_info,
+        "camera_object_exists": camera_stream.picam2 is not None
     })
+
+@app.route('/debug_info')
+def debug_info():
+    """Debug endpoint to check detailed camera state"""
+    info = {
+        "streaming_flags": {
+            "streaming": camera_stream.streaming,
+            "lcd_streaming": camera_stream.lcd_streaming, 
+            "web_streaming": camera_stream.web_streaming
+        },
+        "camera_state": {
+            "picam2_object": camera_stream.picam2 is not None,
+            "camera_active": camera_stream.picam2 is not None
+        },
+        "lcd_state": {
+            "lcd_object": camera_stream.lcd is not None
+        }
+    }
+    
+    # Try to get frame info if camera exists
+    if camera_stream.picam2 is not None:
+        try:
+            with camera_stream.lock:
+                frame = camera_stream.picam2.capture_array()
+                info["last_frame"] = {
+                    "shape": frame.shape if frame is not None else "None",
+                    "dtype": str(frame.dtype) if frame is not None else "None"
+                }
+        except Exception as e:
+            info["last_frame"] = {"error": str(e)}
+    
+    return jsonify(info)
 
 def run_flask_server():
     """Run Flask server in a separate thread"""
