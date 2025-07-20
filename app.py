@@ -60,17 +60,44 @@ class CameraStreamWithLCD:
         self.lcd.LCD_ShowImage(image, 0, 0)
         
     def start_camera(self):
-        """Initialize and start the camera"""
+        """Initialize and start the camera with optimal resolution"""
         if self.picam2 is None:
             self.picam2 = Picamera2()
-            # Configure for both LCD (128x128) and web streaming
-            config = self.picam2.create_preview_configuration(
-                main={"size": (640, 480), "format": "RGB888"}
-            )
+            
+            # Choose resolution based on what's needed
+            if self.web_streaming:
+                # Higher resolution for web streaming
+                config = self.picam2.create_preview_configuration(
+                    main={"size": (640, 480), "format": "RGB888"}
+                )
+            else:
+                # LCD-only mode: use 128x128 like original main.py (no resizing needed!)
+                config = self.picam2.create_preview_configuration(
+                    main={"size": (128, 128), "format": "RGB888"}
+                )
+                
             self.picam2.configure(config)
             self.picam2.start()
             time.sleep(2)  # Allow camera to warm up
             
+    def restart_camera_if_needed(self, need_web_res=False):
+        """Restart camera with different resolution if needed"""
+        current_size = None
+        if self.picam2:
+            # Get current configured size (simplified check)
+            current_size = (640, 480) if need_web_res else (128, 128)
+            
+        need_restart = False
+        if need_web_res and current_size == (128, 128):
+            need_restart = True
+        elif not need_web_res and current_size == (640, 480):
+            need_restart = True
+            
+        if need_restart:
+            print(f"Restarting camera for {'web' if need_web_res else 'LCD-only'} resolution")
+            self.stop_camera()
+            self.start_camera()
+                
     def stop_camera(self):
         """Stop the camera"""
         with self.lock:
@@ -83,10 +110,12 @@ class CameraStreamWithLCD:
         self.display_message(["Starting Stream...", "Web: Available", "LCD: Active", "Press KEY3 to stop"])
         time.sleep(2)
         
-        self.start_camera()
+        # Set streaming flags first so start_camera knows what resolution to use
         self.streaming = True
         self.lcd_streaming = True
         self.web_streaming = True
+        
+        self.start_camera()
         
         # Start LCD streaming in a separate thread
         lcd_thread = threading.Thread(target=self.lcd_stream_loop)
@@ -107,13 +136,26 @@ class CameraStreamWithLCD:
                         # Capture frame
                         frame = self.picam2.capture_array()
                         
-                        # Convert numpy array to PIL Image and resize for LCD (128x128)
+                        # Convert numpy array to PIL Image
                         image = Image.fromarray(frame)
-                        image_resized = image.resize((128, 128), Image.Resampling.LANCZOS)
+                        
+                        # Only resize if not already 128x128 (web streaming mode)
+                        if image.size != (128, 128):
+                            # Use LANCZOS for older PIL versions, fallback to ANTIALIAS for very old versions
+                            try:
+                                # Try new style first (Pillow >= 10.0.0)
+                                image = image.resize((128, 128), Image.Resampling.LANCZOS)
+                            except AttributeError:
+                                try:
+                                    # Try intermediate style (Pillow >= 2.7.0)
+                                    image = image.resize((128, 128), Image.LANCZOS)
+                                except AttributeError:
+                                    # Fallback for very old versions
+                                    image = image.resize((128, 128), Image.ANTIALIAS)
                         
                         # Display on LCD
                         if self.lcd:
-                            self.lcd.LCD_ShowImage(image_resized, 0, 0)
+                            self.lcd.LCD_ShowImage(image, 0, 0)
                         
                 time.sleep(0.05)  # 20 FPS for LCD
         except Exception as e:

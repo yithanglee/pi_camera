@@ -10,6 +10,7 @@ A Flask-based camera streaming server for Raspberry Pi with LCD display integrat
 - **LCD Display**: Shows camera feed on 128x128 LCD with button controls
 - **RESTful API**: Simple API endpoints for remote control
 - **Auto-reconnection**: Web interface handles connection drops gracefully
+- **Lightweight**: Uses only PIL/Pillow for image processing (no OpenCV dependency)
 
 ## Hardware Requirements
 
@@ -27,10 +28,9 @@ A Flask-based camera streaming server for Raspberry Pi with LCD display integrat
 
 - Python 3.7+
 - Flask
-- OpenCV
 - picamera2
 - RPi.GPIO
-- Pillow
+- Pillow (PIL)
 - NumPy
 
 ## Installation
@@ -131,9 +131,16 @@ Use the provided `client_example.py`:
 python3 client_example.py
 ```
 
+The client offers multiple display options:
+- Save frames to disk
+- Display in tkinter window (if tkinter is available)
+- Get single frames
+
 Or create your own client:
 ```python
 import requests
+from PIL import Image
+import io
 
 # Check if stream is active
 response = requests.get("http://YOUR_PI_IP:5000/status")
@@ -143,8 +150,17 @@ if not status['streaming']:
     # Start streaming
     requests.post("http://YOUR_PI_IP:5000/start_stream")
 
-# Use the video feed
-stream_url = "http://YOUR_PI_IP:5000/video_feed"
+# Get a single frame
+response = requests.get("http://YOUR_PI_IP:5000/video_feed", stream=True)
+for chunk in response.iter_content(chunk_size=1024):
+    if b'\xff\xd8' in chunk:  # JPEG start
+        start = chunk.find(b'\xff\xd8')
+        end = chunk.find(b'\xff\xd9')
+        if start != -1 and end != -1:
+            jpeg_data = chunk[start:end+2]
+            image = Image.open(io.BytesIO(jpeg_data))
+            image.save("frame.jpg")
+            break
 ```
 
 ### Example 3: JavaScript/Web Integration
@@ -188,11 +204,14 @@ config = self.picam2.create_preview_configuration(
 )
 
 # For LCD display (in lcd_stream_loop method)
-frame_resized = cv2.resize(frame, (128, 128))  # LCD size
+image_resized = image.resize((128, 128), Image.Resampling.LANCZOS)
 
 # Frame rates
 time.sleep(0.033)  # ~30 FPS for web
 time.sleep(0.05)   # ~20 FPS for LCD
+
+# JPEG quality (in generate_frames method)
+image.save(img_io, format='JPEG', quality=85)  # Adjust quality (1-100)
 ```
 
 ### Network Settings
@@ -226,7 +245,26 @@ libcamera-hello --timeout 2000
 ### Performance Issues
 - Reduce video resolution in configuration
 - Lower frame rates
+- Adjust JPEG quality (lower = faster)
 - Check CPU usage: `htop`
+
+### Missing Dependencies
+The system no longer requires OpenCV, making installation simpler:
+```bash
+# If you have issues with Pillow
+sudo apt-get install python3-pil python3-pil.imagetk
+
+# For tkinter support in client example
+sudo apt-get install python3-tk
+```
+
+## Advantages of PIL/Pillow over OpenCV
+
+- **Smaller footprint**: Fewer dependencies and smaller installation size
+- **Better Pi compatibility**: Native Python image library
+- **Easier installation**: No compilation issues on ARM devices
+- **Sufficient functionality**: All needed image operations for streaming
+- **Better error handling**: More predictable behavior on resource-constrained devices
 
 ## Integration Examples
 
