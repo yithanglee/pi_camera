@@ -184,6 +184,16 @@ class CameraStreamWithLCD:
                         # Convert numpy array to PIL Image
                         image = Image.fromarray(frame)
                         
+                        # Convert RGBA to RGB if needed (JPEG doesn't support transparency)
+                        if image.mode == 'RGBA':
+                            # Create a white background and paste the RGBA image on it
+                            rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+                            rgb_image.paste(image, mask=image.split()[-1])  # Use alpha channel as mask
+                            image = rgb_image
+                        elif image.mode != 'RGB':
+                            # Convert any other mode to RGB
+                            image = image.convert('RGB')
+                        
                         # Convert to JPEG using PIL
                         img_io = io.BytesIO()
                         image.save(img_io, format='JPEG', quality=85)
@@ -192,7 +202,7 @@ class CameraStreamWithLCD:
                         
                         frame_count += 1
                         if frame_count % 30 == 0:  # Log every 30 frames
-                            print(f"Web streaming: frame {frame_count}, size: {image.size}")
+                            print(f"Web streaming: frame {frame_count}, size: {image.size}, mode: {image.mode}")
                         
                         yield (b'--frame\r\n'
                                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
@@ -283,30 +293,30 @@ def video_feed():
                            mimetype='multipart/x-mixed-replace; boundary=frame')
         except Exception as e:
             # If there's an error with streaming, return an error image
-            error_image = Image.new('RGB', (640, 480), color='red')
+            error_image = Image.new('RGB', (640, 480), (255, 0, 0))  # Red background
             draw = ImageDraw.Draw(error_image)
-            draw.text((200, 220), f"Streaming Error:", fill='white')
-            draw.text((200, 240), str(e)[:50], fill='white')
+            draw.text((200, 220), f"Streaming Error:", fill=(255, 255, 255))  # White text
+            draw.text((200, 240), str(e)[:50], fill=(255, 255, 255))
             
             img_io = io.BytesIO()
-            error_image.save(img_io, 'JPEG')
+            error_image.save(img_io, format='JPEG', quality=85)
             img_io.seek(0)
             
             return Response(img_io.read(), mimetype='image/jpeg')
     else:
         # Return a placeholder image when not streaming
-        placeholder = Image.new('RGB', (640, 480), color='black')
+        placeholder = Image.new('RGB', (640, 480), (0, 0, 0))  # Black background
         draw = ImageDraw.Draw(placeholder)
         if not camera_stream.streaming:
-            draw.text((250, 220), "Camera Stream Not Started", fill='white')
-            draw.text((280, 240), "Press KEY1 to start", fill='white')
+            draw.text((250, 220), "Camera Stream Not Started", fill=(255, 255, 255))  # White text
+            draw.text((280, 240), "Press KEY1 to start", fill=(255, 255, 255))
         elif not camera_stream.web_streaming:
-            draw.text((250, 220), "Web Streaming Disabled", fill='white')
+            draw.text((250, 220), "Web Streaming Disabled", fill=(255, 255, 255))
         else:
-            draw.text((250, 220), "Camera Not Active", fill='white')
+            draw.text((250, 220), "Camera Not Active", fill=(255, 255, 255))
         
         img_io = io.BytesIO()
-        placeholder.save(img_io, 'JPEG')
+        placeholder.save(img_io, format='JPEG', quality=85)
         img_io.seek(0)
         
         return Response(img_io.read(), mimetype='image/jpeg')
