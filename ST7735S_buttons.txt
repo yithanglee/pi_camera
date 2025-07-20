@@ -1,0 +1,21 @@
+Pinout
+PIN 	Raspberry Pi Interface (BCM) 	Description
+KEY1 	P21 	KEY1GPIO
+KEY2 	P20 	KEY2GPIO
+KEY3 	P16 	KEY3GPIO
+Joystick UP 	P6 	Upward direction of the Joystick
+Joystick Down 	P19 	Downward direction of the Joystick
+Joystick Left 	P5 	Left direction of the Joystick
+Joystick Right 	P26 	Right direction of the Joystick
+Joystick Press 	P13 	Press the Joystick
+SCLK 	P11/SCLK 	SPI clock pin
+MOSI 	P10/MOS 	SPI data pin
+CS 	P8/CE0 	Chip selection
+DC 	P25 	Data/Command control
+RST 	P27 	Reset
+BL 	P24 	Backlight
+LCD and the controller
+
+The ST7735S is a 132*162 pixel LCD controller, but the pixel of the 1.44-inch LCD HAT is 128*128. So we have made some processing on the display: the horizontal direction starts from the second pixel to guarantee the location of RAM in the LCD is consistent with the actual location at the same time.
+This LCD accepts 8-bits/9-bits/16-bits/18-bit parallel interfaces, which are RGB444, RGB565, and RGB666. The color format used in demo codes is RGB565.
+This LCD uses a 4-wire SPI interface for reducing GPIO, and the communication speed will be faster.
