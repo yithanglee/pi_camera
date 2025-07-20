@@ -11,6 +11,24 @@ import LCD_Config
 
 app = Flask(__name__)
 
+# Add CORS headers to all responses
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    return response
+
+# Handle preflight OPTIONS requests
+@app.route('/<path:path>', methods=['OPTIONS'])
+def handle_options(path):
+    response = Response()
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
+
 # Pin definitions from ST7735S_buttons.txt
 KEY1_PIN = 21  # Start video/streaming
 KEY2_PIN = 20  # Exit program
@@ -289,8 +307,17 @@ def video_feed():
     """Video streaming route"""
     if camera_stream.streaming and camera_stream.web_streaming:
         try:
-            return Response(camera_stream.generate_frames(),
-                           mimetype='multipart/x-mixed-replace; boundary=frame')
+            response = Response(camera_stream.generate_frames(),
+                               mimetype='multipart/x-mixed-replace; boundary=frame')
+            # Add headers to prevent Cloudflare buffering and enable CORS
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+            response.headers['X-Accel-Buffering'] = 'no'
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+            return response
         except Exception as e:
             # If there's an error with streaming, return an error image
             error_image = Image.new('RGB', (640, 480), (255, 0, 0))  # Red background
@@ -302,7 +329,9 @@ def video_feed():
             error_image.save(img_io, format='JPEG', quality=85)
             img_io.seek(0)
             
-            return Response(img_io.read(), mimetype='image/jpeg')
+            response = Response(img_io.read(), mimetype='image/jpeg')
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            return response
     else:
         # Return a placeholder image when not streaming
         placeholder = Image.new('RGB', (640, 480), (0, 0, 0))  # Black background
@@ -319,7 +348,9 @@ def video_feed():
         placeholder.save(img_io, format='JPEG', quality=85)
         img_io.seek(0)
         
-        return Response(img_io.read(), mimetype='image/jpeg')
+        response = Response(img_io.read(), mimetype='image/jpeg')
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
 
 @app.route('/start_stream', methods=['POST'])
 def start_stream():
