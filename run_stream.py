@@ -11,7 +11,6 @@ def check_dependencies():
     """Check if all required dependencies are available"""
     try:
         import flask
-        import cv2
         import RPi.GPIO
         import PIL
         import numpy
@@ -49,8 +48,8 @@ def check_lcd_modules():
 
 def main():
     """Main function to run the streaming server"""
-    print("Pi Camera Streaming Server")
-    print("=" * 40)
+    print("Pi Camera Streaming Server (OpenCV-free)")
+    print("=" * 45)
     
     # Check system requirements
     if not check_dependencies():
@@ -71,7 +70,7 @@ def main():
     print("  - KEY2 (GPIO 20): Exit program")
     print("  - KEY3 (GPIO 16): Stop streaming")
     print("\nPress Ctrl+C to stop the server")
-    print("=" * 40)
+    print("=" * 45)
     
     try:
         # Import and run the main app

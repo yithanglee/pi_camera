@@ -5,10 +5,11 @@ This demonstrates how other applications can use the video stream
 """
 
 import requests
-import cv2
 import numpy as np
 from urllib.parse import urljoin
+from PIL import Image
 import time
+import io
 
 class PiCameraClient:
     def __init__(self, server_url="http://localhost:5000"):
@@ -49,7 +50,7 @@ class PiCameraClient:
             return None
             
     def get_frame(self):
-        """Get a single frame from the video stream"""
+        """Get a single frame from the video stream as PIL Image"""
         try:
             response = self.session.get(urljoin(self.server_url, "/video_feed"), 
                                       stream=True, timeout=5)
@@ -64,21 +65,19 @@ class PiCameraClient:
                     if start != -1 and end != -1:
                         jpeg_data = chunk[start:end+2]
                         
-                        # Convert to OpenCV image
-                        nparr = np.frombuffer(jpeg_data, np.uint8)
-                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                        return frame
+                        # Convert to PIL Image
+                        image = Image.open(io.BytesIO(jpeg_data))
+                        return image
                         
         except Exception as e:
             print(f"Error getting frame: {e}")
             return None
             
-    def stream_video(self, display=True, save_frames=False, output_dir="frames"):
+    def stream_and_display(self, save_frames=False, output_dir="frames"):
         """
-        Stream video from the Pi camera
+        Stream video from the Pi camera and display using PIL
         
         Args:
-            display (bool): Whether to display the video using OpenCV
             save_frames (bool): Whether to save frames to disk
             output_dir (str): Directory to save frames
         """
@@ -89,7 +88,9 @@ class PiCameraClient:
             frame_count = 0
             
         print("Starting video stream...")
-        print("Press 'q' to quit, 's' to save current frame")
+        print("Note: This example saves frames but doesn't display them in real-time")
+        print("For real-time display, consider using tkinter or another GUI library")
+        print("Press Ctrl+C to quit")
         
         try:
             response = self.session.get(urljoin(self.server_url, "/video_feed"), 
@@ -108,45 +109,84 @@ class PiCameraClient:
                     jpeg_data = bytes_data[start:end+2]
                     bytes_data = bytes_data[end+2:]
                     
-                    # Decode frame
-                    nparr = np.frombuffer(jpeg_data, np.uint8)
-                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    
-                    if frame is not None:
-                        if display:
-                            cv2.imshow('Pi Camera Stream', frame)
-                            
-                            key = cv2.waitKey(1) & 0xFF
-                            if key == ord('q'):
-                                break
-                            elif key == ord('s') and save_frames:
-                                filename = f"{output_dir}/frame_{frame_count:06d}.jpg"
-                                cv2.imwrite(filename, frame)
-                                print(f"Saved frame: {filename}")
-                                frame_count += 1
-                                
-                        if save_frames and not display:
+                    # Decode frame using PIL
+                    try:
+                        image = Image.open(io.BytesIO(jpeg_data))
+                        
+                        if save_frames:
                             filename = f"{output_dir}/frame_{frame_count:06d}.jpg"
-                            cv2.imwrite(filename, frame)
+                            image.save(filename)
                             frame_count += 1
                             
                             if frame_count % 30 == 0:  # Print every 30 frames
-                                print(f"Saved {frame_count} frames...")
+                                print(f"Saved {frame_count} frames... (Latest: {image.size})")
+                        else:
+                            # Just print frame info without saving
+                            print(f"Received frame: {image.size}, mode: {image.mode}")
+                            
+                    except Exception as e:
+                        print(f"Error processing frame: {e}")
+                        continue
                                 
         except KeyboardInterrupt:
             print("\nStream interrupted by user")
         except Exception as e:
             print(f"Streaming error: {e}")
-        finally:
-            if display:
-                cv2.destroyAllWindows()
+            
+    def stream_to_tkinter(self):
+        """
+        Stream video and display in a tkinter window
+        This is an optional method that requires tkinter
+        """
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+            from PIL import ImageTk
+        except ImportError:
+            print("tkinter not available. Install with: sudo apt-get install python3-tk")
+            return
+            
+        root = tk.Tk()
+        root.title("Pi Camera Stream")
+        root.geometry("660x500")
+        
+        # Create label for video
+        video_label = ttk.Label(root)
+        video_label.pack(expand=True)
+        
+        # Status label
+        status_label = ttk.Label(root, text="Connecting...")
+        status_label.pack()
+        
+        def update_frame():
+            try:
+                image = self.get_frame()
+                if image:
+                    # Convert PIL image to tkinter PhotoImage
+                    photo = ImageTk.PhotoImage(image)
+                    video_label.configure(image=photo)
+                    video_label.image = photo  # Keep a reference
+                    status_label.configure(text=f"Streaming - {image.size}")
+                else:
+                    status_label.configure(text="No frame received")
+            except Exception as e:
+                status_label.configure(text=f"Error: {e}")
+                
+            # Schedule next update
+            root.after(100, update_frame)  # Update every 100ms
+            
+        # Start the update loop
+        update_frame()
+        
+        print("Starting tkinter display. Close window to stop.")
+        root.mainloop()
 
 def main():
     """Example usage of the Pi Camera client"""
     
     # Initialize client
-    print("Pi Camera Stream Client")
-    print("=" * 30)
+    print("Pi Camera Stream Client (PIL/Pillow version)")
+    print("=" * 45)
     
     # You can change this to your Pi's IP address
     client = PiCameraClient("http://localhost:5000")
@@ -166,9 +206,30 @@ def main():
         print(f"Start result: {start_result}")
         time.sleep(2)  # Wait for stream to start
         
-    # Stream video
+    # Offer different display options
+    print("\nChoose display method:")
+    print("1. Save frames to disk (no real-time display)")
+    print("2. Display in tkinter window (if available)")
+    print("3. Just get single frame")
+    
+    choice = input("Enter choice (1-3): ").strip()
+    
     try:
-        client.stream_video(display=True, save_frames=False)
+        if choice == "1":
+            client.stream_and_display(save_frames=True)
+        elif choice == "2":
+            client.stream_to_tkinter()
+        elif choice == "3":
+            print("Getting single frame...")
+            frame = client.get_frame()
+            if frame:
+                frame.save("single_frame.jpg")
+                print(f"Saved single frame: {frame.size}, mode: {frame.mode}")
+            else:
+                print("Failed to get frame")
+        else:
+            print("Invalid choice, defaulting to frame info display")
+            client.stream_and_display(save_frames=False)
     except Exception as e:
         print(f"Error during streaming: {e}")
         

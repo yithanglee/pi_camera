@@ -1,6 +1,5 @@
 from flask import Flask, Response, render_template, jsonify
 from picamera2 import Picamera2
-import cv2
 import threading
 import time
 import io
@@ -108,13 +107,13 @@ class CameraStreamWithLCD:
                         # Capture frame
                         frame = self.picam2.capture_array()
                         
-                        # Resize for LCD (128x128)
-                        frame_resized = cv2.resize(frame, (128, 128))
-                        image = Image.fromarray(frame_resized)
+                        # Convert numpy array to PIL Image and resize for LCD (128x128)
+                        image = Image.fromarray(frame)
+                        image_resized = image.resize((128, 128), Image.Resampling.LANCZOS)
                         
                         # Display on LCD
                         if self.lcd:
-                            self.lcd.LCD_ShowImage(image, 0, 0)
+                            self.lcd.LCD_ShowImage(image_resized, 0, 0)
                         
                 time.sleep(0.05)  # 20 FPS for LCD
         except Exception as e:
@@ -139,17 +138,17 @@ class CameraStreamWithLCD:
                         # Capture frame as numpy array
                         frame = self.picam2.capture_array()
                         
-                        # Convert RGB to BGR for OpenCV
-                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                        # Convert numpy array to PIL Image
+                        image = Image.fromarray(frame)
                         
-                        # Encode frame as JPEG
-                        ret, buffer = cv2.imencode('.jpg', frame_bgr, 
-                                                 [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        # Convert to JPEG using PIL
+                        img_io = io.BytesIO()
+                        image.save(img_io, format='JPEG', quality=85)
+                        img_io.seek(0)
+                        frame_bytes = img_io.read()
                         
-                        if ret:
-                            frame_bytes = buffer.tobytes()
-                            yield (b'--frame\r\n'
-                                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                     except Exception as e:
                         print(f"Frame generation error: {e}")
                         break

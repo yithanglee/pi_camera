@@ -1,5 +1,4 @@
 Flask==2.3.3
-opencv-python==4.8.1.78
 picamera2
 RPi.GPIO
 Pillow==10.0.1
