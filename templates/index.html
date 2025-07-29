@@ -114,12 +114,29 @@
         }
 
         .status-active {
-            background: #4CAF50;
-            box-shadow: 0 0 10px #4CAF50;
+            background-color: #4CAF50;
+            animation: pulse-green 2s infinite;
+        }
+
+        .status-warning {
+            background-color: #ff9800;
+            animation: pulse-orange 2s infinite;
         }
 
         .status-inactive {
-            background: #f44336;
+            background-color: #f44336;
+        }
+
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(76, 175, 80, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); }
+        }
+
+        @keyframes pulse-orange {
+            0% { box-shadow: 0 0 0 0 rgba(255, 152, 0, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(255, 152, 0, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(255, 152, 0, 0); }
         }
 
         .info-panel {
@@ -230,12 +247,21 @@
         function refreshStatus() {
             fetch('/status')
                 .then(response => response.json())
-                .then(data => {
-                    updateStatusDisplay(data);
+                .then(status => {
+                    updateStatusDisplay(status);
+                    
+                    // Check if network became unstable
+                    if (!status.network_stable && status.streaming) {
+                        console.log('Network instability detected, video may stop');
+                        showNetworkWarning();
+                    } else if (status.network_stable) {
+                        hideNetworkWarning();
+                    }
                 })
                 .catch(error => {
-                    console.error('Error fetching status:', error);
-                    updateStatusDisplay({ streaming: false, error: true });
+                    console.error('Status check failed:', error);
+                    updateStatusDisplay({error: true});
+                    showNetworkWarning();
                 });
         }
 
@@ -247,17 +273,55 @@
                 indicator.className = 'status-indicator status-inactive';
                 text.textContent = 'Connection Error';
             } else if (status.streaming) {
-                indicator.className = 'status-indicator status-active';
-                text.textContent = `Streaming Active (LCD: ${status.lcd_streaming ? 'ON' : 'OFF'}, Web: ${status.web_streaming ? 'ON' : 'OFF'})`;
+                if (status.network_stable) {
+                    indicator.className = 'status-indicator status-active';
+                    text.textContent = `Streaming Active (LCD: ${status.lcd_streaming ? 'ON' : 'OFF'}, Web: ${status.web_streaming ? 'ON' : 'OFF'}, Clients: ${status.active_clients || 0})`;
+                } else {
+                    indicator.className = 'status-indicator status-warning';
+                    text.textContent = `Network Unstable (Failed checks: ${status.network_failed_checks || 0})`;
+                }
             } else {
                 indicator.className = 'status-indicator status-inactive';
                 text.textContent = 'Stream Inactive';
             }
         }
 
+        function showNetworkWarning() {
+            let warning = document.getElementById('networkWarning');
+            if (!warning) {
+                warning = document.createElement('div');
+                warning.id = 'networkWarning';
+                warning.style.cssText = `
+                    position: fixed;
+                    top: 20px;
+                    right: 20px;
+                    background: rgba(255, 165, 0, 0.9);
+                    color: white;
+                    padding: 15px;
+                    border-radius: 10px;
+                    z-index: 1000;
+                    max-width: 300px;
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+                `;
+                warning.innerHTML = `
+                    <strong>⚠️ Network Warning</strong><br>
+                    Connection is unstable. Video may pause or stop.
+                    <button onclick="hideNetworkWarning()" style="margin-left: 10px; background: none; border: 1px solid white; color: white; padding: 5px; border-radius: 3px; cursor: pointer;">×</button>
+                `;
+                document.body.appendChild(warning);
+            }
+        }
+
+        function hideNetworkWarning() {
+            const warning = document.getElementById('networkWarning');
+            if (warning) {
+                warning.remove();
+            }
+        }
+
         function startStatusUpdates() {
             refreshStatus();
-            statusUpdateInterval = setInterval(refreshStatus, 3000);
+            statusUpdateInterval = setInterval(refreshStatus, 2000); // Check every 2 seconds for faster network detection
         }
 
         function stopStatusUpdates() {
@@ -266,18 +330,87 @@
             }
         }
 
+        // Enhanced video stream error handling
+        let videoReconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        let reconnectTimeout;
+
+        function handleVideoError() {
+            console.log('Video stream error detected');
+            videoReconnectAttempts++;
+            
+            if (videoReconnectAttempts <= maxReconnectAttempts) {
+                const delay = Math.min(2000 * videoReconnectAttempts, 10000); // Exponential backoff, max 10s
+                console.log(`Attempting reconnection ${videoReconnectAttempts}/${maxReconnectAttempts} in ${delay}ms`);
+                
+                reconnectTimeout = setTimeout(() => {
+                    const videoElement = document.getElementById('videoStream');
+                    videoElement.src = '/video_feed?' + new Date().getTime();
+                }, delay);
+            } else {
+                console.log('Max reconnection attempts reached');
+                showVideoError();
+            }
+        }
+
+        function handleVideoLoad() {
+            console.log('Video stream loaded successfully');
+            videoReconnectAttempts = 0; // Reset on successful load
+            clearTimeout(reconnectTimeout);
+            hideVideoError();
+        }
+
+        function showVideoError() {
+            let errorDiv = document.getElementById('videoError');
+            if (!errorDiv) {
+                errorDiv = document.createElement('div');
+                errorDiv.id = 'videoError';
+                errorDiv.style.cssText = `
+                    position: absolute;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    background: rgba(255, 0, 0, 0.8);
+                    color: white;
+                    padding: 20px;
+                    border-radius: 10px;
+                    text-align: center;
+                    z-index: 100;
+                `;
+                errorDiv.innerHTML = `
+                    <strong>📡 Connection Lost</strong><br>
+                    Unable to reconnect to video stream.<br>
+                    <button onclick="retryVideoConnection()" style="margin-top: 10px; background: white; color: black; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer;">Retry</button>
+                `;
+                document.querySelector('.video-wrapper').appendChild(errorDiv);
+            }
+        }
+
+        function hideVideoError() {
+            const errorDiv = document.getElementById('videoError');
+            if (errorDiv) {
+                errorDiv.remove();
+            }
+        }
+
+        function retryVideoConnection() {
+            videoReconnectAttempts = 0;
+            hideVideoError();
+            const videoElement = document.getElementById('videoStream');
+            videoElement.src = '/video_feed?' + new Date().getTime();
+        }
+
         // Start status updates when page loads
         window.addEventListener('load', startStatusUpdates);
         
         // Stop updates when page unloads
         window.addEventListener('beforeunload', stopStatusUpdates);
 
-        // Refresh video stream when it errors
-        document.getElementById('videoStream').addEventListener('error', function() {
-            console.log('Video stream error, refreshing...');
-            setTimeout(() => {
-                this.src = '/video_feed?' + new Date().getTime();
-            }, 2000);
+        // Enhanced video event listeners
+        document.getElementById('videoStream').addEventListener('error', handleVideoError);
+        document.getElementById('videoStream').addEventListener('load', handleVideoLoad);
+        document.getElementById('videoStream').addEventListener('loadstart', function() {
+            console.log('Video stream load started');
         });
     </script>
 </body>
