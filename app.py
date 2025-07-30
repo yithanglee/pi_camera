@@ -583,6 +583,157 @@ def debug_info():
     
     return jsonify(info)
 
+@app.route('/capture')
+def capture():
+    """Capture a single frame from the camera and return as JPEG"""
+    try:
+        # Check if camera is available
+        if not camera_stream.streaming or camera_stream.picam2 is None:
+            # If not streaming, try to start camera temporarily for capture
+            temp_camera = False
+            if camera_stream.picam2 is None:
+                temp_camera = True
+                camera_stream.picam2 = Picamera2()
+                # Use web resolution for captures
+                config = camera_stream.picam2.create_preview_configuration(
+                    main={"size": (640, 480)}
+                )
+                camera_stream.picam2.configure(config)
+                camera_stream.picam2.start()
+                time.sleep(1)  # Allow camera to stabilize
+        
+        with camera_stream.lock:
+            if camera_stream.picam2:
+                # Capture frame as numpy array
+                frame = camera_stream.picam2.capture_array()
+                
+                # Convert numpy array to PIL Image
+                image = Image.fromarray(frame)
+                
+                # Convert RGBA to RGB if needed (JPEG doesn't support transparency)
+                if image.mode == 'RGBA':
+                    rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+                    rgb_image.paste(image, mask=image.split()[-1])
+                    image = rgb_image
+                elif image.mode != 'RGB':
+                    image = image.convert('RGB')
+                
+                # Convert to JPEG
+                img_io = io.BytesIO()
+                image.save(img_io, format='JPEG', quality=90)
+                img_io.seek(0)
+                
+                # Clean up temporary camera if we started it
+                if temp_camera:
+                    camera_stream.picam2.stop()
+                    camera_stream.picam2 = None
+                
+                # Return the image with proper headers
+                response = Response(img_io.read(), mimetype='image/jpeg')
+                response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+                response.headers['Pragma'] = 'no-cache'
+                response.headers['Expires'] = '0'
+                response.headers['Content-Disposition'] = f'inline; filename="capture_{int(time.time())}.jpg"'
+                return response
+            else:
+                # Return error image if camera not available
+                error_image = Image.new('RGB', (640, 480), (255, 0, 0))
+                draw = ImageDraw.Draw(error_image)
+                draw.text((200, 220), "Camera Not Available", fill=(255, 255, 255))
+                draw.text((200, 240), "Check camera status", fill=(255, 255, 255))
+                
+                img_io = io.BytesIO()
+                error_image.save(img_io, format='JPEG', quality=85)
+                img_io.seek(0)
+                
+                response = Response(img_io.read(), mimetype='image/jpeg')
+                response.status_code = 503  # Service Unavailable
+                return response
+                
+    except Exception as e:
+        print(f"Capture error: {e}")
+        # Return error image
+        error_image = Image.new('RGB', (640, 480), (255, 100, 100))
+        draw = ImageDraw.Draw(error_image)
+        draw.text((200, 200), "Capture Failed", fill=(255, 255, 255))
+        draw.text((200, 220), f"Error: {str(e)[:30]}", fill=(255, 255, 255))
+        draw.text((200, 240), "Try again later", fill=(255, 255, 255))
+        
+        img_io = io.BytesIO()
+        error_image.save(img_io, format='JPEG', quality=85)
+        img_io.seek(0)
+        
+        response = Response(img_io.read(), mimetype='image/jpeg')
+        response.status_code = 500  # Internal Server Error
+        return response
+
+@app.route('/capture_base64')
+def capture_base64():
+    """Capture a single frame and return as base64 encoded JSON"""
+    try:
+        # Check if camera is available
+        if not camera_stream.streaming or camera_stream.picam2 is None:
+            # If not streaming, try to start camera temporarily for capture
+            temp_camera = False
+            if camera_stream.picam2 is None:
+                temp_camera = True
+                camera_stream.picam2 = Picamera2()
+                config = camera_stream.picam2.create_preview_configuration(
+                    main={"size": (640, 480)}
+                )
+                camera_stream.picam2.configure(config)
+                camera_stream.picam2.start()
+                time.sleep(1)
+        
+        with camera_stream.lock:
+            if camera_stream.picam2:
+                # Capture frame
+                frame = camera_stream.picam2.capture_array()
+                image = Image.fromarray(frame)
+                
+                # Convert to RGB if needed
+                if image.mode == 'RGBA':
+                    rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+                    rgb_image.paste(image, mask=image.split()[-1])
+                    image = rgb_image
+                elif image.mode != 'RGB':
+                    image = image.convert('RGB')
+                
+                # Convert to base64
+                img_io = io.BytesIO()
+                image.save(img_io, format='JPEG', quality=90)
+                img_io.seek(0)
+                
+                import base64
+                img_base64 = base64.b64encode(img_io.read()).decode('utf-8')
+                
+                # Clean up temporary camera if we started it
+                if temp_camera:
+                    camera_stream.picam2.stop()
+                    camera_stream.picam2 = None
+                
+                return jsonify({
+                    "status": "success",
+                    "image": f"data:image/jpeg;base64,{img_base64}",
+                    "timestamp": time.time(),
+                    "size": image.size,
+                    "format": "JPEG"
+                })
+            else:
+                return jsonify({
+                    "status": "error",
+                    "message": "Camera not available",
+                    "timestamp": time.time()
+                }), 503
+                
+    except Exception as e:
+        print(f"Base64 capture error: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "timestamp": time.time()
+        }), 500
+
 def run_flask_server():
     """Run Flask server in a separate thread"""
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True, use_reloader=False)
