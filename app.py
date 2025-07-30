@@ -168,6 +168,10 @@ class CameraStreamWithLCD:
         self.setup_gpio()
         self.active_clients = 0 # Track active clients for video_feed
         self.network_monitor = NetworkMonitor() # Initialize network monitor
+        self.camera_error_count = 0  # Track camera errors
+        self.max_camera_errors = 5   # Max errors before giving up
+        self.last_camera_error = None
+        self.camera_recovery_delay = 10  # Seconds to wait before retry
         
     def setup_gpio(self):
         """Sets up GPIO pins for buttons."""
@@ -178,55 +182,141 @@ class CameraStreamWithLCD:
         
     def setup_lcd(self):
         """Initialize the LCD display."""
-        self.lcd = LCD_1in44.LCD()
-        Lcd_ScanDir = LCD_1in44.SCAN_DIR_DFT
-        self.lcd.LCD_Init(Lcd_ScanDir)
-        self.lcd.LCD_Clear()
+        try:
+            self.lcd = LCD_1in44.LCD()
+            Lcd_ScanDir = LCD_1in44.SCAN_DIR_DFT
+            self.lcd.LCD_Init(Lcd_ScanDir)
+            self.lcd.LCD_Clear()
+        except Exception as e:
+            print(f"LCD setup error: {e}")
+            self.lcd = None
         
     def display_message(self, lines):
         """Displays multi-line messages on the LCD."""
         if not self.lcd:
             return
             
-        image = Image.new("RGB", (self.lcd.width, self.lcd.height), "WHITE")
-        draw = ImageDraw.Draw(image)
         try:
-            font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 12)
-        except IOError:
-            font = ImageFont.load_default()
-        
-        y_text = 10
-        for line in lines:
-            draw.text((5, y_text), line, font=font, fill="BLACK")
-            y_text += 16
-        self.lcd.LCD_ShowImage(image, 0, 0)
-        
-    def start_camera(self):
-        """Initialize and start the camera with optimal resolution"""
-        if self.picam2 is None:
-            self.picam2 = Picamera2()
+            image = Image.new("RGB", (self.lcd.width, self.lcd.height), "WHITE")
+            draw = ImageDraw.Draw(image)
+            try:
+                font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 12)
+            except IOError:
+                font = ImageFont.load_default()
             
-            # Choose resolution based on what's needed
-            if self.web_streaming:
-                # Higher resolution for web streaming - match original format
-                config = self.picam2.create_preview_configuration(
-                    main={"size": (640, 480)}
-                )
-            else:
-                # LCD-only mode: use 128x128 like original main.py (no format specified!)
-                config = self.picam2.create_preview_configuration(
-                    main={"size": (128, 128)}
-                )
+            y_text = 10
+            for line in lines:
+                draw.text((5, y_text), line, font=font, fill="BLACK")
+                y_text += 16
+            self.lcd.LCD_ShowImage(image, 0, 0)
+        except Exception as e:
+            print(f"LCD display error: {e}")
+        
+    def safe_camera_operation(self, operation_func, operation_name="camera operation"):
+        """Safely execute camera operations with error handling and recovery"""
+        try:
+            return operation_func()
+        except Exception as e:
+            self.camera_error_count += 1
+            self.last_camera_error = datetime.now()
+            error_msg = str(e)
+            
+            print(f"Camera error in {operation_name}: {error_msg}")
+            
+            # Check for specific timeout/hardware errors
+            if any(keyword in error_msg.lower() for keyword in ['timeout', 'dequeue', 'frontend', 'connector']):
+                print(f"Hardware timeout detected. Error count: {self.camera_error_count}")
+                self.display_message([
+                    "Camera Timeout!",
+                    "Hardware Issue",
+                    f"Errors: {self.camera_error_count}",
+                    "Attempting recovery..."
+                ])
                 
-            self.picam2.configure(config)
-            self.picam2.start()
-            time.sleep(2)  # Allow camera to warm up
+                # Force camera cleanup and recovery
+                self.force_camera_cleanup()
+                
+                if self.camera_error_count >= self.max_camera_errors:
+                    print("Max camera errors reached. Disabling camera operations.")
+                    self.display_message([
+                        "Camera Failed!",
+                        "Max errors reached",
+                        "Check connections",
+                        "Restart required"
+                    ])
+                    self.streaming = False
+                    self.lcd_streaming = False
+                    self.web_streaming = False
+                    return None
+                
+                # Wait before retry
+                time.sleep(self.camera_recovery_delay)
+                
+            return None
+            
+    def force_camera_cleanup(self):
+        """Force cleanup of camera resources"""
+        print("Forcing camera cleanup...")
+        try:
+            with self.lock:
+                if self.picam2:
+                    try:
+                        self.picam2.stop()
+                    except:
+                        pass
+                    try:
+                        self.picam2.close()
+                    except:
+                        pass
+                    self.picam2 = None
+                    print("Camera object cleaned up")
+                    
+                # Small delay to let hardware reset
+                time.sleep(2)
+                
+        except Exception as e:
+            print(f"Force cleanup error: {e}")
+            
+    def start_camera(self):
+        """Initialize and start the camera with enhanced error handling"""
+        def _start_camera():
+            if self.picam2 is None:
+                # Check if we're in error recovery mode
+                if (self.last_camera_error and 
+                    (datetime.now() - self.last_camera_error).seconds < self.camera_recovery_delay):
+                    print("Camera in recovery mode, skipping start")
+                    return False
+                    
+                self.picam2 = Picamera2()
+                
+                # Choose resolution based on what's needed
+                if self.web_streaming:
+                    # Higher resolution for web streaming
+                    config = self.picam2.create_preview_configuration(
+                        main={"size": (640, 480)}
+                    )
+                else:
+                    # LCD-only mode
+                    config = self.picam2.create_preview_configuration(
+                        main={"size": (128, 128)}
+                    )
+                    
+                self.picam2.configure(config)
+                self.picam2.start()
+                time.sleep(2)  # Allow camera to warm up
+                
+                # Reset error count on successful start
+                self.camera_error_count = 0
+                print("Camera started successfully")
+                return True
+            return True
+            
+        return self.safe_camera_operation(_start_camera, "camera start")
             
     def restart_camera_if_needed(self, need_web_res=False):
         """Restart camera with different resolution if needed"""
         current_size = None
         if self.picam2:
-            # Get current configured size (simplified check)
             current_size = (640, 480) if need_web_res else (128, 128)
             
         need_restart = False
@@ -238,102 +328,183 @@ class CameraStreamWithLCD:
         if need_restart:
             print(f"Restarting camera for {'web' if need_web_res else 'LCD-only'} resolution")
             self.stop_camera()
-            self.start_camera()
+            return self.start_camera()
+        return True
                 
     def stop_camera(self):
-        """Stop the camera"""
+        """Stop the camera with enhanced cleanup"""
         with self.lock:
             if self.picam2:
-                self.picam2.stop()
+                try:
+                    self.picam2.stop()
+                except Exception as e:
+                    print(f"Error stopping camera: {e}")
+                try:
+                    self.picam2.close()
+                except Exception as e:
+                    print(f"Error closing camera: {e}")
                 self.picam2 = None
+                print("Camera stopped and cleaned up")
                 
     def start_streaming(self):
-        """Start both LCD and web streaming"""
-        self.display_message(["Starting Stream...", "Web: Available", "LCD: Active", "Press KEY3 to stop"])
-        time.sleep(2)
-        
-        # Set streaming flags first so start_camera knows what resolution to use
-        self.streaming = True
-        self.lcd_streaming = True
-        self.web_streaming = True
-        
-        self.start_camera()
-        
-        # Start LCD streaming in a separate thread
-        lcd_thread = threading.Thread(target=self.lcd_stream_loop)
-        lcd_thread.daemon = True
-        lcd_thread.start()
+        """Start both LCD and web streaming with error handling"""
+        try:
+            self.display_message(["Starting Stream...", "Initializing...", "Please wait..."])
+            time.sleep(1)
+            
+            # Set streaming flags first
+            self.streaming = True
+            self.lcd_streaming = True
+            self.web_streaming = True
+            
+            # Try to start camera
+            if not self.start_camera():
+                self.display_message(["Stream Failed!", "Camera Error", f"Errors: {self.camera_error_count}", "Check connections"])
+                self.streaming = False
+                self.lcd_streaming = False
+                self.web_streaming = False
+                return False
+            
+            self.display_message(["Stream Active!", "Web: Available", "LCD: Active", "Press KEY3 to stop"])
+            
+            # Start LCD streaming in a separate thread
+            lcd_thread = threading.Thread(target=self.lcd_stream_loop)
+            lcd_thread.daemon = True
+            lcd_thread.start()
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error starting streaming: {e}")
+            self.display_message(["Stream Error!", str(e)[:15], "Try again", "Check hardware"])
+            self.streaming = False
+            self.lcd_streaming = False
+            self.web_streaming = False
+            return False
         
     def lcd_stream_loop(self):
-        """Stream video to LCD display"""
+        """Stream video to LCD display with enhanced error handling"""
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+        
         try:
             while self.lcd_streaming and self.streaming:
+                # Check for stop button
                 if not GPIO.input(KEY3_PIN):
                     print("KEY3 pressed, stopping streams.")
                     self.stop_streaming()
                     break
+                
+                # Skip if too many consecutive errors
+                if consecutive_errors >= max_consecutive_errors:
+                    print("Too many LCD streaming errors, stopping LCD stream")
+                    self.lcd_streaming = False
+                    self.display_message(["LCD Error!", "Too many fails", "Web still active", "Check hardware"])
+                    break
+                
+                def _capture_and_display():
+                    nonlocal consecutive_errors
                     
-                with self.lock:
-                    if self.picam2:
-                        # Capture frame
-                        frame = self.picam2.capture_array()
-                        
-                        # Convert numpy array to PIL Image
-                        image = Image.fromarray(frame)
-                        
-                        # Only resize if not already 128x128 (web streaming mode)
-                        if image.size != (128, 128):
-                            # Use LANCZOS for older PIL versions, fallback to ANTIALIAS for very old versions
-                            try:
-                                # Try new style first (Pillow >= 10.0.0)
-                                image = image.resize((128, 128), Image.Resampling.LANCZOS)
-                            except AttributeError:
+                    with self.lock:
+                        if self.picam2:
+                            # Capture frame with timeout protection
+                            frame = self.picam2.capture_array()
+                            
+                            # Convert numpy array to PIL Image
+                            image = Image.fromarray(frame)
+                            
+                            # Only resize if not already 128x128
+                            if image.size != (128, 128):
                                 try:
-                                    # Try intermediate style (Pillow >= 2.7.0)
-                                    image = image.resize((128, 128), Image.LANCZOS)
+                                    image = image.resize((128, 128), Image.Resampling.LANCZOS)
                                 except AttributeError:
-                                    # Fallback for very old versions
-                                    image = image.resize((128, 128), Image.ANTIALIAS)
-                        
-                        # Display on LCD
-                        if self.lcd:
-                            self.lcd.LCD_ShowImage(image, 0, 0)
-                        
-                time.sleep(0.05)  # 20 FPS for LCD
+                                    try:
+                                        image = image.resize((128, 128), Image.LANCZOS)
+                                    except AttributeError:
+                                        image = image.resize((128, 128), Image.ANTIALIAS)
+                            
+                            # Display on LCD
+                            if self.lcd:
+                                self.lcd.LCD_ShowImage(image, 0, 0)
+                            
+                            consecutive_errors = 0  # Reset on success
+                            return True
+                    return False
+                
+                # Execute capture with error handling
+                success = self.safe_camera_operation(_capture_and_display, "LCD capture")
+                
+                if not success:
+                    consecutive_errors += 1
+                    time.sleep(1)  # Wait longer on error
+                else:
+                    time.sleep(0.05)  # Normal 20 FPS
+                    
         except Exception as e:
-            print(f"LCD streaming error: {e}")
+            print(f"LCD streaming loop error: {e}")
+            self.lcd_streaming = False
         
     def stop_streaming(self):
-        """Stop all streaming"""
+        """Stop all streaming with cleanup"""
+        print("Stopping all streaming...")
         self.streaming = False
         self.lcd_streaming = False
         self.web_streaming = False
+        
+        # Give threads time to finish
+        time.sleep(0.5)
+        
         self.stop_camera()
         
         if self.lcd:
             self.display_message(["Stream Stopped", "Press KEY1 to start", "Press KEY2 to exit"])
-                
+        
+        print("All streaming stopped")
+
     def generate_frames(self):
-        """Generate frames for MJPEG web streaming"""
+        """Generate frames for MJPEG web streaming with enhanced error handling"""
         frame_count = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 20
+        
         while self.web_streaming and self.streaming:
-            with self.lock:
-                if self.picam2:
-                    try:
+            # Stop if too many consecutive errors
+            if consecutive_errors >= max_consecutive_errors:
+                print("Too many web streaming errors, stopping web stream")
+                self.web_streaming = False
+                # Generate error frame and break
+                error_image = Image.new('RGB', (640, 480), color='red')
+                draw = ImageDraw.Draw(error_image)
+                draw.text((200, 220), "Web Stream Failed:", fill='white')
+                draw.text((200, 240), "Too many errors", fill='white')
+                draw.text((200, 260), "Check camera hardware", fill='white')
+                
+                img_io = io.BytesIO()
+                error_image.save(img_io, 'JPEG')
+                img_io.seek(0)
+                error_bytes = img_io.read()
+                
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + error_bytes + b'\r\n')
+                break
+            
+            def _capture_web_frame():
+                nonlocal frame_count, consecutive_errors
+                
+                with self.lock:
+                    if self.picam2:
                         # Capture frame as numpy array
                         frame = self.picam2.capture_array()
                         
                         # Convert numpy array to PIL Image
                         image = Image.fromarray(frame)
                         
-                        # Convert RGBA to RGB if needed (JPEG doesn't support transparency)
+                        # Convert RGBA to RGB if needed
                         if image.mode == 'RGBA':
-                            # Create a white background and paste the RGBA image on it
                             rgb_image = Image.new('RGB', image.size, (255, 255, 255))
-                            rgb_image.paste(image, mask=image.split()[-1])  # Use alpha channel as mask
+                            rgb_image.paste(image, mask=image.split()[-1])
                             image = rgb_image
                         elif image.mode != 'RGB':
-                            # Convert any other mode to RGB
                             image = image.convert('RGB')
                         
                         # Convert to JPEG using PIL
@@ -343,46 +514,41 @@ class CameraStreamWithLCD:
                         frame_bytes = img_io.read()
                         
                         frame_count += 1
+                        consecutive_errors = 0  # Reset on success
+                        
                         if frame_count % 30 == 0:  # Log every 30 frames
                             print(f"Web streaming: frame {frame_count}, size: {image.size}, mode: {image.mode}")
                         
-                        yield (b'--frame\r\n'
-                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                    except Exception as e:
-                        print(f"Frame generation error: {e}")
-                        # Yield an error frame instead of breaking
-                        error_image = Image.new('RGB', (640, 480), color='yellow')
-                        draw = ImageDraw.Draw(error_image)
-                        draw.text((200, 220), "Frame Error:", fill='black')
-                        draw.text((200, 240), str(e)[:40], fill='black')
-                        
-                        img_io = io.BytesIO()
-                        error_image.save(img_io, 'JPEG')
-                        img_io.seek(0)
-                        error_bytes = img_io.read()
-                        
-                        yield (b'--frame\r\n'
-                               b'Content-Type: image/jpeg\r\n\r\n' + error_bytes + b'\r\n')
-                        time.sleep(1)  # Wait before retrying
-                else:
-                    print("Warning: picam2 object is None in generate_frames")
-                    # Generate a "no camera" frame
-                    no_camera_image = Image.new('RGB', (640, 480), color='blue')
-                    draw = ImageDraw.Draw(no_camera_image)
-                    draw.text((250, 220), "No Camera Object", fill='white')
-                    draw.text((250, 240), "Check camera state", fill='white')
-                    
-                    img_io = io.BytesIO()
-                    no_camera_image.save(img_io, 'JPEG')
-                    img_io.seek(0)
-                    no_camera_bytes = img_io.read()
-                    
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + no_camera_bytes + b'\r\n')
-                    time.sleep(1)  # Wait before retrying
-                        
-            time.sleep(0.033)  # ~30 FPS for web
+                        return frame_bytes
+                return None
             
+            # Execute capture with error handling
+            frame_bytes = self.safe_camera_operation(_capture_web_frame, "web frame capture")
+            
+            if frame_bytes:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                time.sleep(0.033)  # ~30 FPS for web
+            else:
+                consecutive_errors += 1
+                print(f"Web frame capture failed, consecutive errors: {consecutive_errors}")
+                
+                # Generate error frame
+                error_image = Image.new('RGB', (640, 480), color='orange')
+                draw = ImageDraw.Draw(error_image)
+                draw.text((200, 200), "Frame Error", fill='black')
+                draw.text((200, 220), f"Consecutive: {consecutive_errors}", fill='black')
+                draw.text((200, 240), "Attempting recovery...", fill='black')
+                
+                img_io = io.BytesIO()
+                error_image.save(img_io, 'JPEG')
+                img_io.seek(0)
+                error_bytes = img_io.read()
+                
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + error_bytes + b'\r\n')
+                time.sleep(1)  # Wait longer on error
+                
     def button_monitor_loop(self):
         """Monitor button presses"""
         while True:
@@ -590,67 +756,78 @@ def capture():
     """Capture a single frame from the camera and return as JPEG"""
     temp_camera = False  # Initialize at the start
     try:
-        # Check if camera is available
-        if not camera_stream.streaming or camera_stream.picam2 is None:
-            # If not streaming, try to start camera temporarily for capture
-            if camera_stream.picam2 is None:
-                temp_camera = True
-                camera_stream.picam2 = Picamera2()
-                # Use web resolution for captures
-                config = camera_stream.picam2.create_preview_configuration(
-                    main={"size": (640, 480)}
-                )
-                camera_stream.picam2.configure(config)
-                camera_stream.picam2.start()
-                time.sleep(1)  # Allow camera to stabilize
+        def _do_capture():
+            nonlocal temp_camera
+            
+            # Check if camera is available
+            if not camera_stream.streaming or camera_stream.picam2 is None:
+                # If not streaming, try to start camera temporarily for capture
+                if camera_stream.picam2 is None:
+                    temp_camera = True
+                    camera_stream.picam2 = Picamera2()
+                    # Use web resolution for captures
+                    config = camera_stream.picam2.create_preview_configuration(
+                        main={"size": (640, 480)}
+                    )
+                    camera_stream.picam2.configure(config)
+                    camera_stream.picam2.start()
+                    time.sleep(1)  # Allow camera to stabilize
+            
+            with camera_stream.lock:
+                if camera_stream.picam2:
+                    # Capture frame as numpy array
+                    frame = camera_stream.picam2.capture_array()
+                    
+                    # Convert numpy array to PIL Image
+                    image = Image.fromarray(frame)
+                    
+                    # Convert RGBA to RGB if needed (JPEG doesn't support transparency)
+                    if image.mode == 'RGBA':
+                        rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+                        rgb_image.paste(image, mask=image.split()[-1])
+                        image = rgb_image
+                    elif image.mode != 'RGB':
+                        image = image.convert('RGB')
+                    
+                    # Convert to JPEG
+                    img_io = io.BytesIO()
+                    image.save(img_io, format='JPEG', quality=90)
+                    img_io.seek(0)
+                    frame_bytes = img_io.read()
+                    
+                    # Clean up temporary camera if we started it
+                    if temp_camera:
+                        camera_stream.picam2.stop()
+                        camera_stream.picam2 = None
+                    
+                    return frame_bytes
+            return None
         
-        with camera_stream.lock:
-            if camera_stream.picam2:
-                # Capture frame as numpy array
-                frame = camera_stream.picam2.capture_array()
-                
-                # Convert numpy array to PIL Image
-                image = Image.fromarray(frame)
-                
-                # Convert RGBA to RGB if needed (JPEG doesn't support transparency)
-                if image.mode == 'RGBA':
-                    rgb_image = Image.new('RGB', image.size, (255, 255, 255))
-                    rgb_image.paste(image, mask=image.split()[-1])
-                    image = rgb_image
-                elif image.mode != 'RGB':
-                    image = image.convert('RGB')
-                
-                # Convert to JPEG
-                img_io = io.BytesIO()
-                image.save(img_io, format='JPEG', quality=90)
-                img_io.seek(0)
-                
-                # Clean up temporary camera if we started it
-                if temp_camera:
-                    camera_stream.picam2.stop()
-                    camera_stream.picam2 = None
-                
-                # Return the image with proper headers
-                response = Response(img_io.read(), mimetype='image/jpeg')
-                response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-                response.headers['Pragma'] = 'no-cache'
-                response.headers['Expires'] = '0'
-                response.headers['Content-Disposition'] = f'inline; filename="capture_{int(time.time())}.jpg"'
-                return response
-            else:
-                # Return error image if camera not available
-                error_image = Image.new('RGB', (640, 480), (255, 0, 0))
-                draw = ImageDraw.Draw(error_image)
-                draw.text((200, 220), "Camera Not Available", fill=(255, 255, 255))
-                draw.text((200, 240), "Check camera status", fill=(255, 255, 255))
-                
-                img_io = io.BytesIO()
-                error_image.save(img_io, format='JPEG', quality=85)
-                img_io.seek(0)
-                
-                response = Response(img_io.read(), mimetype='image/jpeg')
-                response.status_code = 503  # Service Unavailable
-                return response
+        # Use safe camera operation
+        frame_bytes = camera_stream.safe_camera_operation(_do_capture, "single frame capture")
+        
+        if frame_bytes:
+            # Return the image with proper headers
+            response = Response(frame_bytes, mimetype='image/jpeg')
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+            response.headers['Content-Disposition'] = f'inline; filename="capture_{int(time.time())}.jpg"'
+            return response
+        else:
+            # Return error image if camera not available
+            error_image = Image.new('RGB', (640, 480), (255, 0, 0))
+            draw = ImageDraw.Draw(error_image)
+            draw.text((200, 220), "Camera Not Available", fill=(255, 255, 255))
+            draw.text((200, 240), "Check camera status", fill=(255, 255, 255))
+            
+            img_io = io.BytesIO()
+            error_image.save(img_io, format='JPEG', quality=85)
+            img_io.seek(0)
+            
+            response = Response(img_io.read(), mimetype='image/jpeg')
+            response.status_code = 503  # Service Unavailable
+            return response
                 
     except Exception as e:
         print(f"Capture error: {e}")
@@ -682,59 +859,70 @@ def capture_base64():
     """Capture a single frame and return as base64 encoded JSON"""
     temp_camera = False  # Initialize at the start
     try:
-        # Check if camera is available
-        if not camera_stream.streaming or camera_stream.picam2 is None:
-            # If not streaming, try to start camera temporarily for capture
-            if camera_stream.picam2 is None:
-                temp_camera = True
-                camera_stream.picam2 = Picamera2()
-                config = camera_stream.picam2.create_preview_configuration(
-                    main={"size": (640, 480)}
-                )
-                camera_stream.picam2.configure(config)
-                camera_stream.picam2.start()
-                time.sleep(1)
+        def _do_capture_base64():
+            nonlocal temp_camera
+            
+            # Check if camera is available
+            if not camera_stream.streaming or camera_stream.picam2 is None:
+                # If not streaming, try to start camera temporarily for capture
+                if camera_stream.picam2 is None:
+                    temp_camera = True
+                    camera_stream.picam2 = Picamera2()
+                    config = camera_stream.picam2.create_preview_configuration(
+                        main={"size": (640, 480)}
+                    )
+                    camera_stream.picam2.configure(config)
+                    camera_stream.picam2.start()
+                    time.sleep(1)
+            
+            with camera_stream.lock:
+                if camera_stream.picam2:
+                    # Capture frame
+                    frame = camera_stream.picam2.capture_array()
+                    image = Image.fromarray(frame)
+                    
+                    # Convert to RGB if needed
+                    if image.mode == 'RGBA':
+                        rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+                        rgb_image.paste(image, mask=image.split()[-1])
+                        image = rgb_image
+                    elif image.mode != 'RGB':
+                        image = image.convert('RGB')
+                    
+                    # Convert to base64
+                    img_io = io.BytesIO()
+                    image.save(img_io, format='JPEG', quality=90)
+                    img_io.seek(0)
+                    
+                    import base64
+                    img_base64 = base64.b64encode(img_io.read()).decode('utf-8')
+                    
+                    # Clean up temporary camera if we started it
+                    if temp_camera:
+                        camera_stream.picam2.stop()
+                        camera_stream.picam2 = None
+                    
+                    return {
+                        "status": "success",
+                        "image": f"data:image/jpeg;base64,{img_base64}",
+                        "timestamp": time.time(),
+                        "size": image.size,
+                        "format": "JPEG"
+                    }
+            return None
         
-        with camera_stream.lock:
-            if camera_stream.picam2:
-                # Capture frame
-                frame = camera_stream.picam2.capture_array()
-                image = Image.fromarray(frame)
-                
-                # Convert to RGB if needed
-                if image.mode == 'RGBA':
-                    rgb_image = Image.new('RGB', image.size, (255, 255, 255))
-                    rgb_image.paste(image, mask=image.split()[-1])
-                    image = rgb_image
-                elif image.mode != 'RGB':
-                    image = image.convert('RGB')
-                
-                # Convert to base64
-                img_io = io.BytesIO()
-                image.save(img_io, format='JPEG', quality=90)
-                img_io.seek(0)
-                
-                import base64
-                img_base64 = base64.b64encode(img_io.read()).decode('utf-8')
-                
-                # Clean up temporary camera if we started it
-                if temp_camera:
-                    camera_stream.picam2.stop()
-                    camera_stream.picam2 = None
-                
-                return jsonify({
-                    "status": "success",
-                    "image": f"data:image/jpeg;base64,{img_base64}",
-                    "timestamp": time.time(),
-                    "size": image.size,
-                    "format": "JPEG"
-                })
-            else:
-                return jsonify({
-                    "status": "error",
-                    "message": "Camera not available",
-                    "timestamp": time.time()
-                }), 503
+        # Use safe camera operation
+        result = camera_stream.safe_camera_operation(_do_capture_base64, "base64 capture")
+        
+        if result:
+            return jsonify(result)
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Camera not available or capture failed",
+                "timestamp": time.time(),
+                "camera_errors": camera_stream.camera_error_count
+            }), 503
                 
     except Exception as e:
         print(f"Base64 capture error: {e}")
@@ -749,7 +937,8 @@ def capture_base64():
         return jsonify({
             "status": "error",
             "message": str(e),
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "camera_errors": camera_stream.camera_error_count
         }), 500
 
 @app.route('/video_hls')
