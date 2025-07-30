@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pi Camera Stream - React Compatible</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .video-container {
+            text-align: center;
+            margin: 20px 0;
+        }
+        canvas {
+            border: 2px solid #333;
+            border-radius: 8px;
+            max-width: 100%;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin: 20px 0;
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .start { background-color: #4CAF50; color: white; }
+        .stop { background-color: #f44336; color: white; }
+        .capture { background-color: #008CBA; color: white; }
+        .status {
+            background-color: #e7f3ff;
+            border: 1px solid #b3d7ff;
+            border-radius: 4px;
+            padding: 10px;
+            margin: 10px 0;
+        }
+        .method {
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        .method h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        pre {
+            background-color: #f4f4f4;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Pi Camera Stream - React Compatible Solutions</h1>
+        
+        <div class="status" id="status">
+            Status: Loading...
+        </div>
+
+        <div class="video-container">
+            <canvas id="videoCanvas" width="640" height="480"></canvas>
+        </div>
+
+        <div class="controls">
+            <button class="start" onclick="startSSEStream()">Start SSE Stream</button>
+            <button class="stop" onclick="stopSSEStream()">Stop SSE Stream</button>
+            <button class="capture" onclick="captureFrame()">Capture Frame</button>
+            <button class="start" onclick="startPolling()">Start Polling</button>
+            <button class="stop" onclick="stopPolling()">Stop Polling</button>
+        </div>
+
+        <div class="method">
+            <h3>Method 1: Server-Sent Events (SSE) - Recommended for React</h3>
+            <pre><code>// React component example
+import React, { useRef, useEffect, useState } from 'react';
+
+function CameraStream() {
+  const canvasRef = useRef(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+
+  useEffect(() => {
+    if (!isStreaming) return;
+
+    const eventSource = new EventSource('/video_canvas_stream');
+    
+    eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.image) {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        const img = new Image();
+        img.onload = () => {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        };
+        img.src = data.image;
+      }
+    };
+
+    return () => eventSource.close();
+  }, [isStreaming]);
+
+  return (
+    &lt;div&gt;
+      &lt;canvas ref={canvasRef} width="640" height="480" /&gt;
+      &lt;button onClick={() => setIsStreaming(!isStreaming)}&gt;
+        {isStreaming ? 'Stop' : 'Start'} Stream
+      &lt;/button&gt;
+    &lt;/div&gt;
+  );
+}</code></pre>
+        </div>
+
+        <div class="method">
+            <h3>Method 2: Polling Single Frames</h3>
+            <pre><code>// React component with polling
+import React, { useRef, useEffect, useState } from 'react';
+
+function CameraPolling() {
+  const imgRef = useRef(null);
+  const [isPolling, setIsPolling] = useState(false);
+
+  useEffect(() => {
+    if (!isPolling) return;
+
+    const interval = setInterval(() => {
+      if (imgRef.current) {
+        imgRef.current.src = `/capture?t=${Date.now()}`;
+      }
+    }, 100); // 10 FPS
+
+    return () => clearInterval(interval);
+  }, [isPolling]);
+
+  return (
+    &lt;div&gt;
+      &lt;img ref={imgRef} alt="Camera feed" style={{maxWidth: '100%'}} /&gt;
+      &lt;button onClick={() => setIsPolling(!isPolling)}&gt;
+        {isPolling ? 'Stop' : 'Start'} Polling
+      &lt;/button&gt;
+    &lt;/div&gt;
+  );
+}</code></pre>
+        </div>
+
+        <div class="method">
+            <h3>Method 3: Fetch Base64 Images</h3>
+            <pre><code>// React component with fetch
+import React, { useState, useEffect } from 'react';
+
+function CameraFetch() {
+  const [imageSrc, setImageSrc] = useState('');
+  const [isStreaming, setIsStreaming] = useState(false);
+
+  useEffect(() => {
+    if (!isStreaming) return;
+
+    const fetchFrame = async () => {
+      try {
+        const response = await fetch('/capture_base64');
+        const data = await response.json();
+        if (data.status === 'success') {
+          setImageSrc(data.image);
+        }
+      } catch (error) {
+        console.error('Fetch error:', error);
+      }
+    };
+
+    const interval = setInterval(fetchFrame, 100);
+    return () => clearInterval(interval);
+  }, [isStreaming]);
+
+  return (
+    &lt;div&gt;
+      &lt;img src={imageSrc} alt="Camera feed" style={{maxWidth: '100%'}} /&gt;
+      &lt;button onClick={() => setIsStreaming(!isStreaming)}&gt;
+        {isStreaming ? 'Stop' : 'Start'} Stream
+      &lt;/button&gt;
+    &lt;/div&gt;
+  );
+}</code></pre>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        let pollingInterval = null;
+        const canvas = document.getElementById('videoCanvas');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+
+        // Update status
+        async function updateStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                statusDiv.innerHTML = `
+                    Status: ${data.streaming ? 'Streaming' : 'Not streaming'} | 
+                    Camera: ${data.camera_active ? 'Active' : 'Inactive'} | 
+                    Clients: ${data.active_clients}
+                `;
+            } catch (error) {
+                statusDiv.innerHTML = 'Status: Error fetching status';
+            }
+        }
+
+        // SSE Stream
+        function startSSEStream() {
+            if (eventSource) return;
+            
+            eventSource = new EventSource('/video_canvas_stream');
+            
+            eventSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.image) {
+                        const img = new Image();
+                        img.onload = function() {
+                            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        };
+                        img.src = data.image;
+                    }
+                } catch (error) {
+                    console.error('SSE parsing error:', error);
+                }
+            };
+            
+            eventSource.onerror = function(error) {
+                console.error('SSE error:', error);
+                stopSSEStream();
+            };
+            
+            console.log('SSE stream started');
+        }
+
+        function stopSSEStream() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+                console.log('SSE stream stopped');
+            }
+        }
+
+        // Polling method
+        function startPolling() {
+            if (pollingInterval) return;
+            
+            pollingInterval = setInterval(async () => {
+                try {
+                    const img = new Image();
+                    img.onload = function() {
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    };
+                    img.src = `/capture?t=${Date.now()}`;
+                } catch (error) {
+                    console.error('Polling error:', error);
+                }
+            }, 100); // 10 FPS
+            
+            console.log('Polling started');
+        }
+
+        function stopPolling() {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+                pollingInterval = null;
+                console.log('Polling stopped');
+            }
+        }
+
+        // Capture single frame
+        async function captureFrame() {
+            try {
+                const img = new Image();
+                img.onload = function() {
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                };
+                img.src = `/capture?t=${Date.now()}`;
+            } catch (error) {
+                console.error('Capture error:', error);
+            }
+        }
+
+        // Update status every 2 seconds
+        setInterval(updateStatus, 2000);
+        updateStatus();
+    </script>
+</body>
+</html> 

@@ -11,11 +11,13 @@ import LCD_Config
 import socket
 import subprocess
 from datetime import datetime, timedelta
+import json
 
 app = Flask(__name__)
 
 # Allowed CORS origins for external domains
 ALLOWED_ORIGINS = [
+    'https://c278f6f4-ba8a-4106-9667-55c7ada4b91c.lovableproject.com',
     'https://bookworm-scanner-vision.lovable.app',
     'https://lovable.dev',
     'http://localhost:3000',  # For local development
@@ -586,11 +588,11 @@ def debug_info():
 @app.route('/capture')
 def capture():
     """Capture a single frame from the camera and return as JPEG"""
+    temp_camera = False  # Initialize at the start
     try:
         # Check if camera is available
         if not camera_stream.streaming or camera_stream.picam2 is None:
             # If not streaming, try to start camera temporarily for capture
-            temp_camera = False
             if camera_stream.picam2 is None:
                 temp_camera = True
                 camera_stream.picam2 = Picamera2()
@@ -652,6 +654,14 @@ def capture():
                 
     except Exception as e:
         print(f"Capture error: {e}")
+        # Clean up temporary camera on error if we started it
+        if temp_camera and camera_stream.picam2:
+            try:
+                camera_stream.picam2.stop()
+                camera_stream.picam2 = None
+            except:
+                pass
+        
         # Return error image
         error_image = Image.new('RGB', (640, 480), (255, 100, 100))
         draw = ImageDraw.Draw(error_image)
@@ -670,11 +680,11 @@ def capture():
 @app.route('/capture_base64')
 def capture_base64():
     """Capture a single frame and return as base64 encoded JSON"""
+    temp_camera = False  # Initialize at the start
     try:
         # Check if camera is available
         if not camera_stream.streaming or camera_stream.picam2 is None:
             # If not streaming, try to start camera temporarily for capture
-            temp_camera = False
             if camera_stream.picam2 is None:
                 temp_camera = True
                 camera_stream.picam2 = Picamera2()
@@ -728,11 +738,111 @@ def capture_base64():
                 
     except Exception as e:
         print(f"Base64 capture error: {e}")
+        # Clean up temporary camera on error if we started it
+        if temp_camera and camera_stream.picam2:
+            try:
+                camera_stream.picam2.stop()
+                camera_stream.picam2 = None
+            except:
+                pass
+        
         return jsonify({
             "status": "error",
             "message": str(e),
             "timestamp": time.time()
         }), 500
+
+@app.route('/video_hls')
+def video_hls():
+    """HLS streaming endpoint for HTML5 video compatibility"""
+    # For now, we'll create a simple approach using individual frame fetching
+    # This is a placeholder for future HLS implementation
+    return jsonify({
+        "error": "HLS streaming not yet implemented",
+        "alternatives": {
+            "mjpeg_stream": "/video_feed",
+            "single_frame": "/capture",
+            "canvas_solution": "/video_canvas_stream"
+        }
+    })
+
+@app.route('/video_canvas_stream')
+def video_canvas_stream():
+    """Stream individual frames as JSON for canvas-based rendering in React"""
+    def generate_json_frames():
+        frame_count = 0
+        while camera_stream.web_streaming and camera_stream.streaming:
+            with camera_stream.lock:
+                if camera_stream.picam2:
+                    try:
+                        # Capture frame
+                        frame = camera_stream.picam2.capture_array()
+                        image = Image.fromarray(frame)
+                        
+                        # Convert to RGB if needed
+                        if image.mode == 'RGBA':
+                            rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+                            rgb_image.paste(image, mask=image.split()[-1])
+                            image = rgb_image
+                        elif image.mode != 'RGB':
+                            image = image.convert('RGB')
+                        
+                        # Convert to base64
+                        img_io = io.BytesIO()
+                        image.save(img_io, format='JPEG', quality=80)
+                        img_io.seek(0)
+                        
+                        import base64
+                        img_base64 = base64.b64encode(img_io.read()).decode('utf-8')
+                        
+                        frame_count += 1
+                        
+                        # Create JSON frame
+                        frame_data = {
+                            "frame": frame_count,
+                            "timestamp": time.time(),
+                            "image": f"data:image/jpeg;base64,{img_base64}",
+                            "size": image.size
+                        }
+                        
+                        # Send as Server-Sent Events (SSE)
+                        yield f"data: {json.dumps(frame_data)}\n\n"
+                        
+                    except Exception as e:
+                        error_data = {
+                            "error": str(e),
+                            "timestamp": time.time()
+                        }
+                        yield f"data: {json.dumps(error_data)}\n\n"
+                        
+            time.sleep(0.1)  # 10 FPS for canvas streaming
+    
+    # Import json at the top if not already imported
+    import json
+    
+    response = Response(generate_json_frames(), mimetype='text/event-stream')
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Connection'] = 'keep-alive'
+    response.headers['X-Accel-Buffering'] = 'no'
+    return response
+
+@app.route('/video_websocket_info')
+def video_websocket_info():
+    """Provide WebSocket connection info for real-time streaming"""
+    return jsonify({
+        "websocket_url": f"ws://{request.host}/ws/video",
+        "note": "WebSocket streaming not yet implemented",
+        "alternatives": {
+            "server_sent_events": "/video_canvas_stream",
+            "polling": "/capture",
+            "mjpeg": "/video_feed"
+        }
+    })
+
+@app.route('/react')
+def react_example():
+    """React-compatible streaming examples page"""
+    return render_template('react_example.html')
 
 def run_flask_server():
     """Run Flask server in a separate thread"""
