@@ -1,4 +1,4 @@
-from flask import Flask, Response, render_template, jsonify
+from flask import Flask, Response, render_template, jsonify, request
 from picamera2 import Picamera2
 import threading
 import time
@@ -8,31 +8,151 @@ import numpy as np
 import RPi.GPIO as GPIO
 import LCD_1in44
 import LCD_Config
+import socket
+import subprocess
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
+
+# Allowed CORS origins for external domains
+ALLOWED_ORIGINS = [
+    'https://bookworm-scanner-vision.lovable.app',
+    'https://lovable.dev',
+    'http://localhost:3000',  # For local development
+    'http://127.0.0.1:3000',  # For local development
+    'http://localhost:5173',  # Vite dev server
+    'http://127.0.0.1:5173',  # Vite dev server
+]
+
+def is_allowed_origin(origin):
+    """Check if the origin is allowed for CORS"""
+    if not origin:
+        return True  # Allow requests without origin (direct API calls)
+    
+    # Allow any subdomain of lovable.dev
+    if origin.endswith('.lovable.dev') or origin == 'https://lovable.dev':
+        return True
+    
+    # Allow any subdomain of lovable.app
+    if origin.endswith('.lovable.app'):
+        return True
+    
+    # Allow specific origins
+    return origin in ALLOWED_ORIGINS
+
+def get_cors_origin(request_origin):
+    """Get the appropriate CORS origin header value"""
+    if is_allowed_origin(request_origin):
+        return request_origin if request_origin else '*'
+    return None
 
 # Add CORS headers to all responses
 @app.after_request
 def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    origin = request.headers.get('Origin')
+    cors_origin = get_cors_origin(origin)
+    
+    if cors_origin:
+        response.headers.add('Access-Control-Allow-Origin', cors_origin)
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Max-Age', '3600')  # Cache preflight for 1 hour
+    
     return response
 
 # Handle preflight OPTIONS requests
 @app.route('/<path:path>', methods=['OPTIONS'])
 def handle_options(path):
+    origin = request.headers.get('Origin')
+    cors_origin = get_cors_origin(origin)
+    
     response = Response()
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    if cors_origin:
+        response.headers.add('Access-Control-Allow-Origin', cors_origin)
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Max-Age', '3600')
+    else:
+        response.status_code = 403
+    
     return response
+
+@app.route('/cors-test')
+def cors_test():
+    """Test endpoint to verify CORS configuration"""
+    origin = request.headers.get('Origin', 'No origin header')
+    return jsonify({
+        "message": "CORS test successful!",
+        "origin": origin,
+        "allowed": is_allowed_origin(origin),
+        "timestamp": time.time(),
+        "allowed_origins": ALLOWED_ORIGINS,
+        "lovable_domains_supported": [
+            "https://lovable.dev",
+            "*.lovable.dev",
+            "*.lovable.app",
+            "https://bookworm-scanner-vision.lovable.app"
+        ]
+    })
 
 # Pin definitions from ST7735S_buttons.txt
 KEY1_PIN = 21  # Start video/streaming
 KEY2_PIN = 20  # Exit program
 KEY3_PIN = 16  # Stop video/streaming
+
+class NetworkMonitor:
+    def __init__(self):
+        self.is_connected = True
+        self.last_check = datetime.now()
+        self.failed_checks = 0
+        self.max_failed_checks = 3
+        self.check_interval = 5  # seconds
+        
+    def check_internet_connection(self):
+        """Check internet connectivity"""
+        try:
+            # Try to reach Google DNS
+            socket.create_connection(("8.8.8.8", 53), timeout=3)
+            return True
+        except OSError:
+            return False
+    
+    def check_wifi_signal(self):
+        """Check WiFi signal strength (Linux specific)"""
+        try:
+            result = subprocess.run(['iwconfig'], capture_output=True, text=True, timeout=5)
+            if 'Signal level' in result.stdout:
+                # Extract signal level (rough check)
+                return True
+            return False
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return False
+    
+    def is_network_stable(self):
+        """Check if network is stable enough for streaming"""
+        now = datetime.now()
+        
+        # Only check every few seconds to avoid overhead
+        if (now - self.last_check).seconds < self.check_interval:
+            return self.is_connected
+            
+        self.last_check = now
+        
+        # Check both WiFi and internet
+        wifi_ok = self.check_wifi_signal()
+        internet_ok = self.check_internet_connection()
+        
+        if wifi_ok and internet_ok:
+            self.failed_checks = 0
+            self.is_connected = True
+        else:
+            self.failed_checks += 1
+            if self.failed_checks >= self.max_failed_checks:
+                self.is_connected = False
+                
+        return self.is_connected
 
 class CameraStreamWithLCD:
     def __init__(self):
@@ -44,6 +164,8 @@ class CameraStreamWithLCD:
         self.lcd = None
         self.setup_lcd()
         self.setup_gpio()
+        self.active_clients = 0 # Track active clients for video_feed
+        self.network_monitor = NetworkMonitor() # Initialize network monitor
         
     def setup_gpio(self):
         """Sets up GPIO pins for buttons."""
@@ -304,22 +426,41 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
-    """Video streaming route"""
+    """Video streaming route with enhanced CORS"""
     if camera_stream.streaming and camera_stream.web_streaming:
         try:
-            response = Response(camera_stream.generate_frames(),
+            # Track active clients
+            camera_stream.active_clients = getattr(camera_stream, 'active_clients', 0) + 1
+            print(f"New client connected. Active clients: {camera_stream.active_clients}")
+            
+            def generate_with_cleanup():
+                try:
+                    for frame in camera_stream.generate_frames():
+                        yield frame
+                except GeneratorExit:
+                    print("Client disconnected")
+                except Exception as e:
+                    print(f"Streaming error for client: {e}")
+                finally:
+                    # Decrement client counter when connection closes
+                    camera_stream.active_clients = max(0, getattr(camera_stream, 'active_clients', 1) - 1)
+                    print(f"Client disconnected. Active clients: {camera_stream.active_clients}")
+            
+            response = Response(generate_with_cleanup(),
                                mimetype='multipart/x-mixed-replace; boundary=frame')
-            # Add headers to prevent Cloudflare buffering and enable CORS
+            # CORS headers will be automatically added by after_request
             response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
             response.headers['Pragma'] = 'no-cache'
             response.headers['Expires'] = '0'
             response.headers['X-Accel-Buffering'] = 'no'
-            response.headers['Access-Control-Allow-Origin'] = '*'
-            response.headers['Access-Control-Allow-Methods'] = 'GET'
-            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+            response.headers['Connection'] = 'keep-alive'
             return response
+            
         except Exception as e:
-            # If there's an error with streaming, return an error image
+            # Cleanup on error
+            camera_stream.active_clients = max(0, getattr(camera_stream, 'active_clients', 1) - 1)
+            print(f"Error setting up stream for client: {e}")
+            # Return error image
             error_image = Image.new('RGB', (640, 480), (255, 0, 0))  # Red background
             draw = ImageDraw.Draw(error_image)
             draw.text((200, 220), f"Streaming Error:", fill=(255, 255, 255))  # White text
@@ -330,7 +471,6 @@ def video_feed():
             img_io.seek(0)
             
             response = Response(img_io.read(), mimetype='image/jpeg')
-            response.headers['Access-Control-Allow-Origin'] = '*'
             return response
     else:
         # Return a placeholder image when not streaming
@@ -349,7 +489,6 @@ def video_feed():
         img_io.seek(0)
         
         response = Response(img_io.read(), mimetype='image/jpeg')
-        response.headers['Access-Control-Allow-Origin'] = '*'
         return response
 
 @app.route('/start_stream', methods=['POST'])
@@ -373,7 +512,7 @@ def stop_stream():
 
 @app.route('/status')
 def status():
-    """Get streaming status"""
+    """Get streaming and network status with enhanced info"""
     camera_active = False
     camera_info = "No camera"
     
@@ -393,7 +532,23 @@ def status():
         "web_streaming": camera_stream.web_streaming,
         "camera_active": camera_active,
         "camera_info": camera_info,
-        "camera_object_exists": camera_stream.picam2 is not None
+        "camera_object_exists": camera_stream.picam2 is not None,
+        "network_stable": camera_stream.network_monitor.is_network_stable(),
+        "active_clients": getattr(camera_stream, 'active_clients', 0),
+        "network_failed_checks": camera_stream.network_monitor.failed_checks
+    })
+
+@app.route('/network_status')
+def network_status():
+    """Get detailed network status"""
+    return jsonify({
+        "network_stable": camera_stream.network_monitor.is_network_stable(),
+        "failed_checks": camera_stream.network_monitor.failed_checks,
+        "max_failed_checks": camera_stream.network_monitor.max_failed_checks,
+        "last_check": camera_stream.network_monitor.last_check.isoformat(),
+        "check_interval": camera_stream.network_monitor.check_interval,
+        "wifi_available": camera_stream.network_monitor.check_wifi_signal(),
+        "internet_available": camera_stream.network_monitor.check_internet_connection()
     })
 
 @app.route('/debug_info')
