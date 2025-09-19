@@ -23,8 +23,15 @@ KEY3_PIN = 16  # Refresh status
 ESP32_EN_PIN = 4    # ESP32 EN (reset) - GPIO4
 ESP32_GPIO0_PIN = 17  # ESP32 GPIO0 (boot mode) - GPIO17
 
-# ESP32 Flash configuration
-ESP32_PORT = "/dev/serial0"  # Pi UART pins (GPIO14/15)
+# ESP32 Flash configuration - Multiple connection support
+ESP32_PORTS = [
+    "/dev/ttyUSB0",    # USB connection (most common)
+    "/dev/ttyUSB1",    # USB connection (alternative)
+    "/dev/ttyACM0",    # USB connection (some ESP32 boards)
+    "/dev/serial0",    # Pi UART pins (GPIO14/15)
+    "/dev/ttyAMA0",    # Pi UART alternative
+    "/dev/ttyS0"       # Pi UART alternative
+]
 ESP32_CHIP = "esp32"
 ESP32_BAUD = 460800
 
@@ -179,32 +186,76 @@ class ESP32Flasher:
     
     def esp32_enter_download_mode(self):
         """Put ESP32 into download mode for flashing."""
-        print("Putting ESP32 into download mode...")
-        self.display_message(["ESP32 Setup", "Entering download", "mode..."], color="WHITE", bg_color="BLUE")
+        port, conn_type = self.detect_esp32_port()
         
-        # GPIO0 low = download mode, EN pulse = reset
-        GPIO.output(ESP32_GPIO0_PIN, GPIO.LOW)   # Pull GPIO0 low
-        time.sleep(0.1)
-        GPIO.output(ESP32_EN_PIN, GPIO.LOW)      # Reset ESP32
-        time.sleep(0.1) 
-        GPIO.output(ESP32_EN_PIN, GPIO.HIGH)     # Release reset
-        time.sleep(0.5)                          # Wait for ESP32 to enter download mode
-        
-        print("ESP32 should now be in download mode")
+        if conn_type == "UART":
+            # Use GPIO control for UART connection
+            print("Using GPIO control for UART connection")
+            self.display_message(["ESP32 Setup", "GPIO download mode", "UART connection"], 
+                               color="WHITE", bg_color="BLUE")
+            
+            GPIO.output(ESP32_GPIO0_PIN, GPIO.LOW)   # Pull GPIO0 low
+            time.sleep(0.1)
+            GPIO.output(ESP32_EN_PIN, GPIO.LOW)      # Reset ESP32
+            time.sleep(0.1) 
+            GPIO.output(ESP32_EN_PIN, GPIO.HIGH)     # Release reset
+            time.sleep(0.5)                          # Wait for ESP32 to enter download mode
+            
+            print("ESP32 should now be in download mode")
+        else:
+            # USB connection - either manual or GPIO-controlled custom cable
+            print("USB connection detected")
+            self.display_message(["ESP32 Setup", "USB connection", "Auto-detecting..."], 
+                               color="WHITE", bg_color="BLUE")
+            
+            # Try GPIO control first (in case it's a custom cable)
+            try:
+                GPIO.output(ESP32_GPIO0_PIN, GPIO.LOW)   # Pull GPIO0 low
+                time.sleep(0.1)
+                GPIO.output(ESP32_EN_PIN, GPIO.LOW)      # Reset ESP32
+                time.sleep(0.1) 
+                GPIO.output(ESP32_EN_PIN, GPIO.HIGH)     # Release reset
+                time.sleep(0.5)
+                print("GPIO control attempted for USB connection")
+            except:
+                # GPIO control not available - show manual instructions
+                self.display_message(["ESP32 Setup", "USB Manual Mode:", "Hold BOOT, Press EN"], 
+                                   color="WHITE", bg_color="ORANGE")
+                time.sleep(3)  # Give user time to see message
+                print("Manual boot mode required - hold BOOT, press EN")
     
     def esp32_exit_download_mode(self):
         """Reset ESP32 to normal operation mode."""
-        print("Resetting ESP32 to normal mode...")
+        port, conn_type = self.detect_esp32_port()
         
-        # GPIO0 high = normal boot, EN pulse = reset
-        GPIO.output(ESP32_GPIO0_PIN, GPIO.HIGH)  # Release GPIO0 for normal boot
-        time.sleep(0.1)
-        GPIO.output(ESP32_EN_PIN, GPIO.LOW)      # Reset ESP32
-        time.sleep(0.1)
-        GPIO.output(ESP32_EN_PIN, GPIO.HIGH)     # Release reset
-        time.sleep(0.5)                          # Wait for normal boot
-        
-        print("ESP32 reset to normal operation")
+        if conn_type == "UART":
+            # Use GPIO control for UART connection
+            print("Resetting ESP32 to normal mode via GPIO...")
+            
+            GPIO.output(ESP32_GPIO0_PIN, GPIO.HIGH)  # Release GPIO0 for normal boot
+            time.sleep(0.1)
+            GPIO.output(ESP32_EN_PIN, GPIO.LOW)      # Reset ESP32
+            time.sleep(0.1)
+            GPIO.output(ESP32_EN_PIN, GPIO.HIGH)     # Release reset
+            time.sleep(0.5)                          # Wait for normal boot
+            
+            print("ESP32 reset to normal operation")
+        else:
+            # USB connection
+            print("USB connection - attempting GPIO reset...")
+            
+            try:
+                # Try GPIO control (custom cable)
+                GPIO.output(ESP32_GPIO0_PIN, GPIO.HIGH)  # Release GPIO0 for normal boot
+                time.sleep(0.1)
+                GPIO.output(ESP32_EN_PIN, GPIO.LOW)      # Reset ESP32
+                time.sleep(0.1)
+                GPIO.output(ESP32_EN_PIN, GPIO.HIGH)     # Release reset
+                time.sleep(0.5)
+                print("GPIO reset completed for USB connection")
+            except:
+                # Manual reset or auto-reset after flashing
+                print("USB connection - ESP32 will auto-reset or press EN button manually")
     
     def parse_esptool_line(self, line):
         """Parse esptool output line and extract progress information."""
@@ -353,6 +404,26 @@ class ESP32Flasher:
             
         finally:
             self.flashing = False
+    
+    def detect_esp32_port(self):
+        """Detect available ESP32 connection port and type."""
+        for port in ESP32_PORTS:
+            if os.path.exists(port):
+                try:
+                    # Determine connection type
+                    if "ttyUSB" in port or "ttyACM" in port:
+                        conn_type = "USB"
+                    else:
+                        conn_type = "UART"
+                    
+                    print(f"Found ESP32 port: {port} ({conn_type})")
+                    return port, conn_type
+                except Exception as e:
+                    print(f"Port {port} exists but not accessible: {e}")
+                    continue
+        
+        print("No ESP32 ports found")
+        return None, None
         
     def check_files(self):
         """Check if all required flash files exist."""
@@ -379,14 +450,17 @@ class ESP32Flasher:
                 if not exists:
                     status_lines.append(f"  {file_type}: NO")
         
-        # Show UART status  
-        if os.path.exists(ESP32_PORT):
-            status_lines.append("UART: Ready")
+        # Show connection status
+        port, conn_type = self.detect_esp32_port()
+        if port:
+            # Show connection type and port
+            port_short = port.split('/')[-1]  # Just the device name
+            status_lines.append(f"{conn_type}: {port_short}")
         else:
-            status_lines.append("UART: Check wiring")
+            status_lines.append("No ESP32 found")
             
         # Show controls
-        if all_files_ok and os.path.exists(ESP32_PORT):
+        if all_files_ok and port:
             status_lines.extend([
                 "",
                 "KEY1: Flash ESP32",
@@ -396,7 +470,7 @@ class ESP32Flasher:
         else:
             status_lines.extend([
                 "",
-                "KEY1: Flash (check files)",
+                "KEY1: Flash (need files/ESP32)",
                 "KEY2: Exit",
                 "KEY3: Download FW"
             ])
@@ -417,10 +491,16 @@ class ESP32Flasher:
                 time.sleep(3)
                 return
                 
-            if not os.path.exists(ESP32_PORT):
-                self.display_message(["Flash FAILED", "UART not available", "Check wiring"], color="WHITE", bg_color="RED")
+            # Detect ESP32 port
+            port, conn_type = self.detect_esp32_port()
+            if not port:
+                self.display_message(["Flash FAILED", "No ESP32 found", "Check connections"], color="WHITE", bg_color="RED")
                 time.sleep(3)
                 return
+            
+            # Show detected connection
+            port_name = port.split('/')[-1]
+            print(f"Using {conn_type} connection: {port}")
             
             # Put ESP32 into download mode
             self.esp32_enter_download_mode()
@@ -428,7 +508,7 @@ class ESP32Flasher:
             # Initialize progress
             self.current_stage = "Starting"
             self.current_percent = 0
-            self.display_progress("Starting", 0)
+            self.display_progress(f"Starting {conn_type}", 0)
             
             # Build esptool command
             script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -436,7 +516,7 @@ class ESP32Flasher:
             cmd = [
                 "esptool.py",
                 "--chip", ESP32_CHIP,
-                "--port", ESP32_PORT,
+                "--port", port,  # Use detected port
                 "--baud", str(ESP32_BAUD),
                 "write_flash", "-z"
             ]

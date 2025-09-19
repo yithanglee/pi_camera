@@ -12,8 +12,15 @@ Place these binary files in the same directory as `main.py`:
 
 ## Hardware Connections
 
-Connect ESP32 to Raspberry Pi UART pins:
+The flasher supports **both USB and UART connections**:
 
+### **Option 1: USB Connection**
+- **ESP32 USB → Pi USB port** (simple plug-in)
+- **Optional**: Custom cable with GPIO control wires:
+  - Pi GPIO4 → ESP32 EN (auto reset)
+  - Pi GPIO17 → ESP32 GPIO0 (auto boot mode)
+
+### **Option 2: Direct UART Connection**
 - **Pi GPIO14 (TXD) → ESP32 RX**
 - **Pi GPIO15 (RXD) → ESP32 TX**  
 - **Pi GND → ESP32 GND**
@@ -23,10 +30,10 @@ Connect ESP32 to Raspberry Pi UART pins:
 ## Requirements
 
 - esptool.py (install with `pip install esptool`)
-- ESP32 connected via UART (`/dev/serial0`)
+- ESP32 connected via **USB** or **UART** (auto-detected)
 - LCD display (ST7735S compatible)
 - Raspberry Pi with GPIO buttons
-- UART enabled in Pi config (`sudo raspi-config` → Interface Options → Serial)
+- For UART: UART enabled in Pi config (`sudo raspi-config` → Interface Options → Serial)
 
 ## Controls
 
@@ -52,9 +59,16 @@ Connect ESP32 to Raspberry Pi UART pins:
 
 ## Flash Command
 
-The application executes this esptool command:
+The application auto-detects the connection and executes esptool:
 
 ```bash
+# USB Connection Example:
+esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 460800 write_flash -z \
+  0x1000  sketch_apr20a.ino.bootloader.bin \
+  0x8000  sketch_apr20a.ino.partitions.bin \
+  0x10000 sketch_apr20a.ino.bin
+
+# UART Connection Example:  
 esptool.py --chip esp32 --port /dev/serial0 --baud 460800 write_flash -z \
   0x1000  sketch_apr20a.ino.bootloader.bin \
   0x8000  sketch_apr20a.ino.partitions.bin \
@@ -63,14 +77,20 @@ esptool.py --chip esp32 --port /dev/serial0 --baud 460800 write_flash -z \
 
 ## Automatic Boot Mode Control
 
+### **UART Connection (Fully Automatic)**
 - **Before flashing**: ESP32 GPIO0 pulled LOW, then reset (enters download mode)
 - **After flashing**: ESP32 GPIO0 released HIGH, then reset (normal boot)
 - **No manual intervention** required - fully automated!
+
+### **USB Connection (Smart Detection)**
+- **Custom cable with GPIO wires**: Automatic control (same as UART)
+- **Standard USB cable**: Manual mode - hold BOOT button, press EN
+- **Auto-detection**: Tries GPIO control first, falls back to manual instructions
 
 ## Status Display
 
 The LCD shows:
 - File availability status
-- UART connection status  
-- Flash progress with boot mode control
+- **Connection type**: USB: ttyUSB0 or UART: serial0
+- Flash progress with automatic boot mode control
 - Success/error messages with automatic ESP32 reset
