@@ -6,6 +6,7 @@ Uses the existing LCD interface to flash ESP32 with KEY1 button press
 import time
 import subprocess
 import threading
+import re
 import RPi.GPIO as GPIO
 from PIL import Image, ImageDraw, ImageFont
 import LCD_1in44
@@ -46,6 +47,8 @@ class ESP32Flasher:
         self.lcd = None
         self.flashing = False
         self.flash_progress = ""
+        self.current_stage = ""
+        self.current_percent = 0
         self.setup_lcd()
         self.setup_gpio()
         self.check_files()
@@ -121,6 +124,59 @@ class ESP32Flasher:
         except Exception as e:
             print(f"Display error: {e}")
     
+    def display_progress(self, stage, percent, details=""):
+        """Display progress with progress bar on LCD."""
+        if not self.lcd:
+            print(f"Progress: {stage} {percent}% {details}")
+            return
+            
+        try:
+            image = Image.new("RGB", (self.lcd.width, self.lcd.height), "BLUE")
+            draw = ImageDraw.Draw(image)
+            
+            try:
+                font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 10)
+            except IOError:
+                try:
+                    font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 10)
+                except IOError:
+                    font = ImageFont.load_default()
+            
+            # Title
+            draw.text((2, 2), "ESP32 FLASHING", font=font, fill="WHITE")
+            
+            # Stage
+            stage_text = stage[:18]  # Truncate if too long
+            draw.text((2, 16), stage_text, font=font, fill="WHITE")
+            
+            # Progress percentage
+            draw.text((2, 30), f"{percent}%", font=font, fill="WHITE")
+            
+            # Progress bar
+            bar_x = 2
+            bar_y = 45
+            bar_width = self.lcd.width - 4
+            bar_height = 8
+            
+            # Background bar
+            draw.rectangle([bar_x, bar_y, bar_x + bar_width, bar_y + bar_height], 
+                          outline="WHITE", fill="DARKBLUE")
+            
+            # Progress fill
+            if percent > 0:
+                fill_width = int((bar_width - 2) * percent / 100)
+                draw.rectangle([bar_x + 1, bar_y + 1, bar_x + 1 + fill_width, bar_y + bar_height - 1], 
+                              fill="WHITE")
+            
+            # Details (if any)
+            if details:
+                details_text = details[:18]  # Truncate if too long
+                draw.text((2, 58), details_text, font=font, fill="WHITE")
+                
+            self.lcd.LCD_ShowImage(image, 0, 0)
+        except Exception as e:
+            print(f"Progress display error: {e}")
+    
     def esp32_enter_download_mode(self):
         """Put ESP32 into download mode for flashing."""
         print("Putting ESP32 into download mode...")
@@ -149,6 +205,52 @@ class ESP32Flasher:
         time.sleep(0.5)                          # Wait for normal boot
         
         print("ESP32 reset to normal operation")
+    
+    def parse_esptool_line(self, line):
+        """Parse esptool output line and extract progress information."""
+        
+        line = line.strip()
+        
+        # Extract percentage from "Writing at 0x... (XX %)" lines
+        percent_match = re.search(r'\((\d+) %\)', line)
+        if percent_match:
+            self.current_percent = int(percent_match.group(1))
+        
+        # Determine current stage
+        if "Connecting" in line:
+            self.current_stage = "Connecting"
+            self.current_percent = 0
+        elif "Chip is" in line:
+            self.current_stage = "Connected"
+            self.current_percent = 5
+        elif "Flash will be erased" in line:
+            self.current_stage = "Erasing Flash"
+            self.current_percent = 10
+        elif "Compressed" in line and "bytes to" in line:
+            self.current_stage = "Compressing"
+            self.current_percent = 15
+        elif "Writing at 0x00001000" in line:
+            self.current_stage = "Bootloader"
+        elif "Writing at 0x00008000" in line:
+            self.current_stage = "Partitions"  
+        elif "Writing at 0x00010000" in line:
+            self.current_stage = "Firmware"
+        elif "Wrote" in line and "bytes" in line:
+            if "0x00001000" in line:
+                self.current_stage = "Bootloader Done"
+            elif "0x00008000" in line:
+                self.current_stage = "Partitions Done"
+            elif "0x00010000" in line:
+                self.current_stage = "Firmware Done"
+        elif "Hash of data verified" in line:
+            self.current_stage = "Verifying"
+        elif "Leaving" in line:
+            self.current_stage = "Complete"
+            self.current_percent = 100
+        elif "Hard resetting" in line:
+            self.current_stage = "Resetting"
+            
+        return self.current_stage, self.current_percent
         
     def check_files(self):
         """Check if all required flash files exist."""
@@ -163,7 +265,7 @@ class ESP32Flasher:
     
     def get_status_display(self):
         """Get current status for display."""
-        status_lines = ["ESP32 Flasher"]
+        status_lines = ["ESP32 Flasher Enhanced"]
         
         # Show file status
         all_files_ok = all(self.files_status.values())
@@ -221,8 +323,10 @@ class ESP32Flasher:
             # Put ESP32 into download mode
             self.esp32_enter_download_mode()
             
-            # Show starting message
-            self.display_message(["FLASHING ESP32", "Please wait...", "", "Do not disconnect"], color="WHITE", bg_color="BLUE")
+            # Initialize progress
+            self.current_stage = "Starting"
+            self.current_percent = 0
+            self.display_progress("Starting", 0)
             
             # Build esptool command
             script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -253,31 +357,38 @@ class ESP32Flasher:
                 cwd=script_dir
             )
             
-            # Monitor progress
-            progress_lines = ["FLASHING...", "", ""]
-            line_count = 0
-            
+            # Monitor progress with enhanced parsing
             for line in iter(process.stdout.readline, ''):
+                if not line:
+                    break
+                    
                 line = line.strip()
                 if line:
                     print(f"esptool: {line}")
                     
-                    # Update progress display
-                    if "Writing at" in line or "%" in line:
-                        progress_lines[1] = line[:16]  # Truncate for LCD
-                    elif "Connecting" in line:
-                        progress_lines[1] = "Connecting..."
-                    elif "Chip is" in line:
-                        progress_lines[1] = "Connected"
-                    elif "Erasing" in line:
-                        progress_lines[1] = "Erasing..."
-                    elif "Writing" in line and "0x" in line:
-                        progress_lines[1] = "Writing flash..."
-                        
-                    # Update display every few lines
-                    line_count += 1
-                    if line_count % 3 == 0:
-                        self.display_message(progress_lines, color="WHITE", bg_color="BLUE")
+                    # Parse the line and update progress
+                    stage, percent = self.parse_esptool_line(line)
+                    
+                    # Extract details for display
+                    details = ""
+                    if "Writing at 0x" in line:
+                        # Extract address for display
+                        addr_match = re.search(r'0x([0-9a-f]+)', line)
+                        if addr_match:
+                            details = f"@{addr_match.group(1)[:6]}"
+                    elif "bytes" in line and ("compressed" in line or "Wrote" in line):
+                        # Extract byte count
+                        bytes_match = re.search(r'(\d+) bytes', line)
+                        if bytes_match:
+                            bytes_count = int(bytes_match.group(1))
+                            if bytes_count > 1000:
+                                details = f"{bytes_count//1000}KB"
+                            else:
+                                details = f"{bytes_count}B"
+                    
+                    # Update display
+                    self.display_progress(stage, percent, details)
+                    time.sleep(0.1)  # Small delay for LCD update
             
             # Wait for process to complete
             return_code = process.wait()
