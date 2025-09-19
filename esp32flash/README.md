@@ -32,16 +32,23 @@ Connect ESP32 to Raspberry Pi UART pins:
 
 - **KEY1 (GPIO 21)**: Flash ESP32
 - **KEY2 (GPIO 20)**: Exit program
-- **KEY3 (GPIO 16)**: Refresh status
+- **KEY3 (GPIO 16)**: Download firmware from server
 
 ## Usage
 
 1. **Enable UART**: Run `sudo raspi-config` → Interface Options → Serial → Enable
 2. **Wire connections**: Connect ESP32 to Pi using the GPIO pins listed above
-3. **Place files**: Put your ESP32 binary files in this directory
+3. **Get firmware**: Press KEY3 to auto-download firmware OR place your ESP32 binary files in this directory
 4. **Run**: `python3 main.py`
 5. **Flash**: Press KEY1 to start flashing (automatic boot mode control)
 6. **Monitor**: Progress shown on LCD, ESP32 auto-reset after completion
+
+### Auto-Download Feature
+
+- **KEY3** automatically downloads the latest firmware from the server
+- Downloads: `https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw9.ino.zip`
+- Extracts files and cleans up automatically
+- Shows progress on LCD (orange background during download)
 
 ## Flash Command
 

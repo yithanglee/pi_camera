@@ -251,6 +251,108 @@ class ESP32Flasher:
             self.current_stage = "Resetting"
             
         return self.current_stage, self.current_percent
+    
+    def download_firmware(self):
+        """Download and extract firmware files from server."""
+        if self.flashing:
+            return
+            
+        self.flashing = True  # Prevent other operations during download
+        
+        try:
+            # Show download starting
+            self.display_message(["DOWNLOADING", "Firmware files...", "", "Please wait"], color="WHITE", bg_color="ORANGE")
+            
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            temp_zip = os.path.join(script_dir, "temp.zip")
+            
+            # Download command
+            download_url = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw9.ino.zip"
+            
+            print("Downloading firmware files...")
+            
+            # Execute wget command
+            cmd = ["wget", "-O", temp_zip, download_url]
+            result = subprocess.run(cmd, cwd=script_dir, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                self.display_message(["DOWNLOAD FAILED", "Check network", "connection"], color="WHITE", bg_color="RED")
+                print(f"wget failed: {result.stderr}")
+                time.sleep(3)
+                return
+            
+            # Show extraction
+            self.display_message(["EXTRACTING", "Files...", "", "Almost done"], color="WHITE", bg_color="ORANGE")
+            
+            # Extract files
+            cmd = ["unzip", "-o", temp_zip]
+            result = subprocess.run(cmd, cwd=script_dir, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                self.display_message(["EXTRACT FAILED", "Invalid zip file"], color="WHITE", bg_color="RED")
+                print(f"unzip failed: {result.stderr}")
+                time.sleep(3)
+                return
+            
+            # Clean up temp file
+            if os.path.exists(temp_zip):
+                os.remove(temp_zip)
+            
+            # Check if files were extracted successfully
+            self.check_files()
+            all_files_ok = all(self.files_status.values())
+            
+            if all_files_ok:
+                self.display_message([
+                    "DOWNLOAD SUCCESS!",
+                    "",
+                    "All files ready",
+                    "Press KEY1 to flash"
+                ], color="WHITE", bg_color="GREEN")
+                print("Firmware files downloaded successfully!")
+            else:
+                missing_files = [f for f, exists in self.files_status.items() if not exists]
+                self.display_message([
+                    "PARTIAL SUCCESS",
+                    f"Missing: {missing_files[0]}",
+                    "Check files"
+                ], color="WHITE", bg_color="ORANGE")
+                print(f"Some files still missing: {missing_files}")
+                
+        except FileNotFoundError as e:
+            if "wget" in str(e):
+                self.display_message([
+                    "DOWNLOAD FAILED",
+                    "wget not found",
+                    "Install wget"
+                ], color="WHITE", bg_color="RED")
+                print("wget not found. Install with: sudo apt install wget")
+            elif "unzip" in str(e):
+                self.display_message([
+                    "EXTRACT FAILED", 
+                    "unzip not found",
+                    "Install unzip"
+                ], color="WHITE", bg_color="RED")
+                print("unzip not found. Install with: sudo apt install unzip")
+            else:
+                self.display_message([
+                    "DOWNLOAD FAILED",
+                    "Missing tools"
+                ], color="WHITE", bg_color="RED")
+                print(f"Tool not found: {e}")
+            time.sleep(3)
+            
+        except Exception as e:
+            self.display_message([
+                "DOWNLOAD FAILED",
+                "Error occurred:",
+                str(e)[:16]
+            ], color="WHITE", bg_color="RED")
+            print(f"Download error: {e}")
+            time.sleep(3)
+            
+        finally:
+            self.flashing = False
         
     def check_files(self):
         """Check if all required flash files exist."""
@@ -289,14 +391,14 @@ class ESP32Flasher:
                 "",
                 "KEY1: Flash ESP32",
                 "KEY2: Exit",
-                "KEY3: Refresh"
+                "KEY3: Download FW"
             ])
         else:
             status_lines.extend([
                 "",
-                "Fix issues first",
+                "KEY1: Flash (check files)",
                 "KEY2: Exit",
-                "KEY3: Refresh"
+                "KEY3: Download FW"
             ])
             
         return status_lines
@@ -476,11 +578,10 @@ class ESP32Flasher:
                     sys.exit(0)
                     
                 if not GPIO.input(KEY3_PIN) and not self.flashing:
-                    print("KEY3 pressed, refreshing status.")
-                    self.check_files()
-                    status_lines = self.get_status_display()
-                    self.display_message(status_lines)
-                    last_display_update = current_time
+                    print("KEY3 pressed, downloading firmware.")
+                    download_thread = threading.Thread(target=self.download_firmware)
+                    download_thread.daemon = True
+                    download_thread.start()
                     time.sleep(0.5)  # Debounce
                     
                 time.sleep(0.1)  # Polling delay
@@ -494,11 +595,11 @@ class ESP32Flasher:
 
 def main():
     """Main function"""
-    print("ESP32 Flasher starting...")
+    print("ESP32 Flasher Enhanced starting...")
     print("Controls:")
     print("KEY1 (GPIO 21): Flash ESP32")
     print("KEY2 (GPIO 20): Exit program") 
-    print("KEY3 (GPIO 16): Refresh status")
+    print("KEY3 (GPIO 16): Download firmware")
     print(f"Expected flash files in {os.path.dirname(os.path.abspath(__file__))}:")
     for file_type, filename in FLASH_FILES.items():
         print(f"  {file_type}: {filename}")
