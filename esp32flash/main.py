@@ -60,7 +60,7 @@ class ESP32Flasher:
         self.key3_pressed_at = None  # For detecting long press on right key
         # Firmware URLs (both default to same; update URL_2 as needed)
         self.FIRMWARE_URL_1 = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw9.ino.zip"
-        self.FIRMWARE_URL_2 = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw9.ino.zip"
+        self.FIRMWARE_URL_2 = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw10.ino.zip"
         self.setup_lcd()
         self.setup_gpio()
         self.check_files()
