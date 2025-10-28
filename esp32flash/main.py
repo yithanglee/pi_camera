@@ -56,6 +56,11 @@ class ESP32Flasher:
         self.flash_progress = ""
         self.current_stage = ""
         self.current_percent = 0
+        self.current_page = 1  # 1 = main (flash/download), 2 = network utils
+        self.key3_pressed_at = None  # For detecting long press on right key
+        # Firmware URLs (both default to same; update URL_2 as needed)
+        self.FIRMWARE_URL_1 = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw9.ino.zip"
+        self.FIRMWARE_URL_2 = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw9.ino.zip"
         self.setup_lcd()
         self.setup_gpio()
         self.check_files()
@@ -303,8 +308,18 @@ class ESP32Flasher:
             
         return self.current_stage, self.current_percent
     
-    def download_firmware(self):
-        """Download and extract firmware files from server."""
+    def build_cache_busted_url(self, base_url):
+        """Append a cache-busting timestamp query parameter to the URL."""
+        try:
+            sep = '&' if '?' in base_url else '?'
+            return f"{base_url}{sep}v={int(time.time())}"
+        except Exception:
+            return base_url
+
+    def download_firmware(self, url_index=1):
+        """Download and extract firmware files from server.
+        url_index: 1 for primary URL, 2 for secondary URL
+        """
         if self.flashing:
             return
             
@@ -318,12 +333,20 @@ class ESP32Flasher:
             temp_zip = os.path.join(script_dir, "temp.zip")
             
             # Download command
-            download_url = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw9.ino.zip"
+            base_url = self.FIRMWARE_URL_1 if url_index == 1 else self.FIRMWARE_URL_2
+            download_url = self.build_cache_busted_url(base_url)
             
             print("Downloading firmware files...")
             
             # Execute wget command
-            cmd = ["wget", "-O", temp_zip, download_url]
+            cmd = [
+                "wget",
+                "--no-cache",
+                "--header", "Cache-Control: no-cache",
+                "--header", "Pragma: no-cache",
+                "-O", temp_zip,
+                download_url
+            ]
             result = subprocess.run(cmd, cwd=script_dir, capture_output=True, text=True)
             
             if result.returncode != 0:
@@ -437,45 +460,123 @@ class ESP32Flasher:
         return all(self.files_status.values())
     
     def get_status_display(self):
-        """Get current status for display."""
+        """Get current status for display (page-aware)."""
         status_lines = ["ESP32 Flasher Enhanced"]
         
-        # Show file status
-        all_files_ok = all(self.files_status.values())
-        if all_files_ok:
-            status_lines.append("Files: OK")
-        else:
-            status_lines.append("Files: MISSING")
-            for file_type, exists in self.files_status.items():
-                if not exists:
-                    status_lines.append(f"  {file_type}: NO")
-        
-        # Show connection status
-        port, conn_type = self.detect_esp32_port()
-        if port:
-            # Show connection type and port
-            port_short = port.split('/')[-1]  # Just the device name
-            status_lines.append(f"{conn_type}: {port_short}")
-        else:
-            status_lines.append("No ESP32 found")
+        if self.current_page == 1:
+            # Show file status
+            all_files_ok = all(self.files_status.values())
+            if all_files_ok:
+                status_lines.append("Files: OK")
+            else:
+                status_lines.append("Files: MISSING")
+                for file_type, exists in self.files_status.items():
+                    if not exists:
+                        status_lines.append(f"  {file_type}: NO")
             
-        # Show controls
-        if all_files_ok and port:
+            # Show connection status
+            port, conn_type = self.detect_esp32_port()
+            if port:
+                port_short = port.split('/')[-1]
+                status_lines.append(f"{conn_type}: {port_short}")
+            else:
+                status_lines.append("No ESP32 found")
+            
+            # Controls (Page 1)
             status_lines.extend([
                 "",
                 "KEY1: Flash ESP32",
-                "KEY2: Exit",
-                "KEY3: Download FW"
+                "KEY2: Download FW1",
+                "KEY3: Download FW2",
+                "Hold RIGHT: Page 2"
             ])
         else:
+            # Page 2: Network utilities
             status_lines.extend([
+                "Page 2: Network",
                 "",
-                "KEY1: Flash (need files/ESP32)",
-                "KEY2: Exit",
-                "KEY3: Download FW"
+                "KEY1: Start AP mode",
+                "KEY2: WiFi status",
+                "KEY3: Exit",
             ])
-            
+        
         return status_lines
+
+    def start_ap_mode(self):
+        """Attempt to start Wi-Fi AP mode on wlan0 using NetworkManager (nmcli)."""
+        try:
+            self.display_message(["AP MODE", "Starting...", "SSID: PiZero2-AP"], color="WHITE", bg_color="ORANGE")
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            # Try nmcli hotspot
+            cmd = [
+                "nmcli", "dev", "wifi", "hotspot",
+                "ifname", "wlan0",
+                "ssid", "PiZero2-AP",
+                "password", "pizerow2AP"
+            ]
+            result = subprocess.run(cmd, cwd=script_dir, capture_output=True, text=True)
+            if result.returncode == 0:
+                self.display_message(["AP MODE", "Started", "SSID: PiZero2-AP"], color="WHITE", bg_color="GREEN")
+                time.sleep(2)
+                return
+            # Fallback: try create_ap if available
+            cmd_check = subprocess.run(["which", "create_ap"], capture_output=True, text=True)
+            if cmd_check.returncode == 0:
+                cmd2 = ["create_ap", "wlan0", "eth0", "PiZero2-AP", "pizerow2AP", "-n"]
+                result2 = subprocess.run(cmd2, capture_output=True, text=True)
+                if result2.returncode == 0:
+                    self.display_message(["AP MODE", "Started", "SSID: PiZero2-AP"], color="WHITE", bg_color="GREEN")
+                    time.sleep(2)
+                    return
+            # If all failed
+            self.display_message(["AP FAILED", "Install nmcli", "or create_ap"], color="WHITE", bg_color="RED")
+            print(f"AP start failed. nmcli: {result.stderr}")
+            time.sleep(2)
+        except Exception as e:
+            self.display_message(["AP ERROR", str(e)[:16]], color="WHITE", bg_color="RED")
+            print(f"AP mode error: {e}")
+            time.sleep(2)
+
+    def show_wifi_status(self):
+        """Display basic Wi-Fi status details."""
+        try:
+            ssid = ""
+            ip4 = ""
+            link = ""
+            # SSID
+            try:
+                out = subprocess.run(["iwgetid", "-r"], capture_output=True, text=True)
+                if out.returncode == 0:
+                    ssid = out.stdout.strip()
+            except Exception:
+                pass
+            # IP
+            try:
+                out = subprocess.run(["hostname", "-I"], capture_output=True, text=True)
+                if out.returncode == 0:
+                    ip4 = out.stdout.strip().split(" ")[0]
+            except Exception:
+                pass
+            # Link state
+            try:
+                out = subprocess.run(["iw", "dev", "wlan0", "link"], capture_output=True, text=True)
+                if out.returncode == 0:
+                    first_line = out.stdout.strip().splitlines()[0] if out.stdout else ""
+                    link = first_line[:18]
+            except Exception:
+                pass
+            lines = [
+                "WiFi Status",
+                f"SSID: {ssid[:12] if ssid else 'N/A'}",
+                f"IP: {ip4[:14] if ip4 else 'N/A'}",
+                link if link else ""
+            ]
+            self.display_message([l for l in lines if l], color="WHITE", bg_color="BLUE")
+            time.sleep(2)
+        except Exception as e:
+            self.display_message(["WiFi Error", str(e)[:16]], color="WHITE", bg_color="RED")
+            print(f"WiFi status error: {e}")
+            time.sleep(2)
     
     def flash_esp32(self):
         """Flash the ESP32 with the binary files."""
@@ -626,7 +727,7 @@ class ESP32Flasher:
             time.sleep(3)  # Show result for 3 seconds
     
     def button_monitor_loop(self):
-        """Monitor button presses."""
+        """Monitor button presses with page-aware actions and long-press on KEY3 to switch page."""
         last_display_update = 0
         
         while True:
@@ -640,31 +741,67 @@ class ESP32Flasher:
                     self.display_message(status_lines)
                     last_display_update = current_time
                 
-                # Check button presses
+                # KEY1 actions
                 if not GPIO.input(KEY1_PIN) and not self.flashing:
-                    print("KEY1 pressed, starting ESP32 flash.")
-                    flash_thread = threading.Thread(target=self.flash_esp32)
-                    flash_thread.daemon = True
-                    flash_thread.start()
-                    time.sleep(0.5)  # Debounce
-                    
-                if not GPIO.input(KEY2_PIN):
-                    print("KEY2 pressed, exiting program.")
-                    self.display_message(["Goodbye!", "Shutting down..."])
-                    time.sleep(1)
-                    if self.lcd:
-                        self.lcd.LCD_Clear()
-                    GPIO.cleanup()
-                    sys.exit(0)
-                    
+                    if self.current_page == 1:
+                        print("KEY1 pressed, starting ESP32 flash.")
+                        flash_thread = threading.Thread(target=self.flash_esp32)
+                        flash_thread.daemon = True
+                        flash_thread.start()
+                    else:
+                        print("KEY1 pressed (Page 2), starting AP mode.")
+                        ap_thread = threading.Thread(target=self.start_ap_mode)
+                        ap_thread.daemon = True
+                        ap_thread.start()
+                    time.sleep(0.3)  # Debounce
+                
+                # KEY2 actions
+                if not GPIO.input(KEY2_PIN) and not self.flashing:
+                    if self.current_page == 1:
+                        print("KEY2 pressed, downloading firmware URL 1.")
+                        download_thread = threading.Thread(target=self.download_firmware, args=(1,))
+                        download_thread.daemon = True
+                        download_thread.start()
+                    else:
+                        print("KEY2 pressed (Page 2), showing WiFi status.")
+                        self.show_wifi_status()
+                    time.sleep(0.3)  # Debounce
+                
+                # KEY3 actions (short vs long press)
                 if not GPIO.input(KEY3_PIN) and not self.flashing:
-                    print("KEY3 pressed, downloading firmware.")
-                    download_thread = threading.Thread(target=self.download_firmware)
-                    download_thread.daemon = True
-                    download_thread.start()
-                    time.sleep(0.5)  # Debounce
-                    
-                time.sleep(0.1)  # Polling delay
+                    # Pressed
+                    if self.key3_pressed_at is None:
+                        self.key3_pressed_at = current_time
+                    else:
+                        if self.current_page == 1 and (current_time - self.key3_pressed_at > 1.2):
+                            # Long press on Page 1 -> switch to Page 2
+                            self.current_page = 2
+                            print("KEY3 long-press: Switched to Page 2")
+                            self.display_message(self.get_status_display())
+                            self.key3_pressed_at = float('inf')  # Prevent retrigger until release
+                else:
+                    # Released
+                    if self.key3_pressed_at is not None and self.key3_pressed_at != float('inf'):
+                        press_duration = current_time - self.key3_pressed_at
+                        if press_duration <= 1.2:
+                            if self.current_page == 1 and not self.flashing:
+                                print("KEY3 short-press, downloading firmware URL 2.")
+                                download_thread = threading.Thread(target=self.download_firmware, args=(2,))
+                                download_thread.daemon = True
+                                download_thread.start()
+                            elif self.current_page == 2:
+                                print("KEY3 pressed (Page 2), exiting program.")
+                                self.display_message(["Goodbye!", "Shutting down..."])
+                                time.sleep(1)
+                                if self.lcd:
+                                    self.lcd.LCD_Clear()
+                                GPIO.cleanup()
+                                sys.exit(0)
+                        # Reset tracking
+                    if self.key3_pressed_at is not None:
+                        self.key3_pressed_at = None
+                
+                time.sleep(0.05)  # Polling delay
                 
             except KeyboardInterrupt:
                 print("Keyboard interrupt received")
