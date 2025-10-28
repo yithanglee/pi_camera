@@ -15,9 +15,12 @@ import os
 import sys
 
 # Pin definitions (same as camera app)
-KEY1_PIN = 21  # Flash ESP32
-KEY2_PIN = 20  # Exit program
-KEY3_PIN = 16  # Refresh status
+KEY1_PIN = 21  # Button 1
+KEY2_PIN = 20  # Button 2
+KEY3_PIN = 16  # Button 3
+# Joystick/Navigation
+JOY_LEFT_PIN = 5   # Joystick Left
+JOY_RIGHT_PIN = 26 # Joystick Right
 
 # ESP32 Control pins
 ESP32_EN_PIN = 4    # ESP32 EN (reset) - GPIO4
@@ -57,7 +60,7 @@ class ESP32Flasher:
         self.current_stage = ""
         self.current_percent = 0
         self.current_page = 1  # 1 = main (flash/download), 2 = network utils
-        self.key3_pressed_at = None  # For detecting long press on right key
+        # No long-press behavior; navigation via joystick left/right
         # Firmware URLs (both default to same; update URL_2 as needed)
         self.FIRMWARE_URL_1 = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw9.ino.zip"
         self.FIRMWARE_URL_2 = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw10.ino.zip"
@@ -82,6 +85,9 @@ class ESP32Flasher:
         GPIO.setup(KEY1_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(KEY2_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(KEY3_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        # Joystick navigation pins
+        GPIO.setup(JOY_LEFT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(JOY_RIGHT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         
         # ESP32 control pins
         GPIO.setup(ESP32_EN_PIN, GPIO.OUT, initial=GPIO.HIGH)    # EN high = normal operation
@@ -523,7 +529,7 @@ class ESP32Flasher:
                 "KEY1: Flash ESP32",
                 "KEY2: Download FW1",
                 "KEY3: Download FW2",
-                "Hold RIGHT: Page 2"
+                "LEFT/RIGHT: Switch page"
             ])
         else:
             # Page 2: Network utilities
@@ -537,6 +543,7 @@ class ESP32Flasher:
                 "KEY1: Start AP mode",
                 "KEY2: WiFi status",
                 "KEY3: Flash fw2",
+                "LEFT/RIGHT: Switch page",
             ])
         
         return status_lines
@@ -784,7 +791,7 @@ class ESP32Flasher:
             time.sleep(3)  # Show result for 3 seconds
     
     def button_monitor_loop(self):
-        """Monitor button presses with page-aware actions and long-press on KEY3 to switch page."""
+        """Monitor button presses with page-aware actions and LEFT/RIGHT navigation."""
         last_display_update = 0
         
         while True:
@@ -824,36 +831,33 @@ class ESP32Flasher:
                         self.show_wifi_status()
                     time.sleep(0.3)  # Debounce
                 
-                # KEY3 actions (short vs long press)
+                # KEY3 action (no long-press): Page 1 download URL2, Page 2 flash fw2
                 if not GPIO.input(KEY3_PIN) and not self.flashing:
-                    # Pressed
-                    if self.key3_pressed_at is None:
-                        self.key3_pressed_at = current_time
+                    if self.current_page == 1:
+                        print("KEY3 pressed, downloading firmware URL 2.")
+                        download_thread = threading.Thread(target=self.download_firmware, args=(2,))
+                        download_thread.daemon = True
+                        download_thread.start()
                     else:
-                        if self.current_page == 1 and (current_time - self.key3_pressed_at > 1.2):
-                            # Long press on Page 1 -> switch to Page 2
-                            self.current_page = 2
-                            print("KEY3 long-press: Switched to Page 2")
-                            self.display_message(self.get_status_display())
-                            self.key3_pressed_at = float('inf')  # Prevent retrigger until release
-                else:
-                    # Released
-                    if self.key3_pressed_at is not None and self.key3_pressed_at != float('inf'):
-                        press_duration = current_time - self.key3_pressed_at
-                        if press_duration <= 1.2:
-                            if self.current_page == 1 and not self.flashing:
-                                print("KEY3 short-press, downloading firmware URL 2.")
-                                download_thread = threading.Thread(target=self.download_firmware, args=(2,))
-                                download_thread.daemon = True
-                                download_thread.start()
-                            elif self.current_page == 2 and not self.flashing:
-                                print("KEY3 pressed (Page 2), flash from fw2.")
-                                t = threading.Thread(target=self.flash_esp32, args=(2,))
-                                t.daemon = True
-                                t.start()
-                        # Reset tracking
-                    if self.key3_pressed_at is not None:
-                        self.key3_pressed_at = None
+                        print("KEY3 pressed (Page 2), flash from fw2.")
+                        t = threading.Thread(target=self.flash_esp32, args=(2,))
+                        t.daemon = True
+                        t.start()
+                    time.sleep(0.3)  # Debounce
+
+                # LEFT/RIGHT navigation
+                if not GPIO.input(JOY_LEFT_PIN):
+                    if self.current_page != 1:
+                        self.current_page = 1
+                        print("Navigation: LEFT -> Page 1")
+                        self.display_message(self.get_status_display())
+                        time.sleep(0.3)
+                if not GPIO.input(JOY_RIGHT_PIN):
+                    if self.current_page != 2:
+                        self.current_page = 2
+                        print("Navigation: RIGHT -> Page 2")
+                        self.display_message(self.get_status_display())
+                        time.sleep(0.3)
                 
                 time.sleep(0.05)  # Polling delay
                 
