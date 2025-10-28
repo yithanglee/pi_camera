@@ -61,9 +61,19 @@ class ESP32Flasher:
         # Firmware URLs (both default to same; update URL_2 as needed)
         self.FIRMWARE_URL_1 = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw9.ino.zip"
         self.FIRMWARE_URL_2 = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw10.ino.zip"
+        # Directories
+        self.script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.SLOT_DIRS = {
+            1: os.path.join(self.script_dir, "fw1"),
+            2: os.path.join(self.script_dir, "fw2"),
+        }
+        # Per-slot file status
+        self.files_status_1 = {k: False for k in FLASH_FILES}
+        self.files_status_2 = {k: False for k in FLASH_FILES}
         self.setup_lcd()
         self.setup_gpio()
-        self.check_files()
+        self.ensure_slot_dirs()
+        self.check_files()  # initialize statuses for both slots
         
     def setup_gpio(self):
         """Sets up GPIO pins for buttons and ESP32 control."""
@@ -316,6 +326,34 @@ class ESP32Flasher:
         except Exception:
             return base_url
 
+    def ensure_slot_dirs(self):
+        """Ensure firmware slot directories exist."""
+        for _, d in self.SLOT_DIRS.items():
+            try:
+                os.makedirs(d, exist_ok=True)
+            except Exception:
+                pass
+
+    def get_slot_dir(self, slot_index):
+        return self.SLOT_DIRS.get(slot_index, self.SLOT_DIRS[1])
+
+    def check_files_slot(self, slot_index):
+        """Check files presence in a specific slot directory."""
+        slot_dir = self.get_slot_dir(slot_index)
+        status = {}
+        for file_type, filename in FLASH_FILES.items():
+            filepath = os.path.join(slot_dir, filename)
+            status[file_type] = os.path.exists(filepath)
+        if slot_index == 1:
+            self.files_status_1 = status
+        else:
+            self.files_status_2 = status
+        return status
+
+    def all_files_ok(self, slot_index):
+        status = self.files_status_1 if slot_index == 1 else self.files_status_2
+        return all(status.values())
+
     def download_firmware(self, url_index=1):
         """Download and extract firmware files from server.
         url_index: 1 for primary URL, 2 for secondary URL
@@ -329,8 +367,8 @@ class ESP32Flasher:
             # Show download starting
             self.display_message(["DOWNLOADING", "Firmware files...", "", "Please wait"], color="WHITE", bg_color="ORANGE")
             
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            temp_zip = os.path.join(script_dir, "temp.zip")
+            temp_zip = os.path.join(self.script_dir, "temp.zip")
+            target_dir = self.get_slot_dir(url_index)
             
             # Download command
             base_url = self.FIRMWARE_URL_1 if url_index == 1 else self.FIRMWARE_URL_2
@@ -347,7 +385,7 @@ class ESP32Flasher:
                 "-O", temp_zip,
                 download_url
             ]
-            result = subprocess.run(cmd, cwd=script_dir, capture_output=True, text=True)
+            result = subprocess.run(cmd, cwd=self.script_dir, capture_output=True, text=True)
             
             if result.returncode != 0:
                 self.display_message(["DOWNLOAD FAILED", "Check network", "connection"], color="WHITE", bg_color="RED")
@@ -359,8 +397,8 @@ class ESP32Flasher:
             self.display_message(["EXTRACTING", "Files...", "", "Almost done"], color="WHITE", bg_color="ORANGE")
             
             # Extract files
-            cmd = ["unzip", "-o", temp_zip]
-            result = subprocess.run(cmd, cwd=script_dir, capture_output=True, text=True)
+            cmd = ["unzip", "-o", temp_zip, "-d", target_dir]
+            result = subprocess.run(cmd, cwd=self.script_dir, capture_output=True, text=True)
             
             if result.returncode != 0:
                 self.display_message(["EXTRACT FAILED", "Invalid zip file"], color="WHITE", bg_color="RED")
@@ -373,19 +411,20 @@ class ESP32Flasher:
                 os.remove(temp_zip)
             
             # Check if files were extracted successfully
-            self.check_files()
-            all_files_ok = all(self.files_status.values())
+            self.check_files_slot(url_index)
+            all_files_ok = self.all_files_ok(url_index)
             
             if all_files_ok:
                 self.display_message([
                     "DOWNLOAD SUCCESS!",
                     "",
                     "All files ready",
-                    "Press KEY1 to flash"
+                    "Ready to flash"
                 ], color="WHITE", bg_color="GREEN")
                 print("Firmware files downloaded successfully!")
             else:
-                missing_files = [f for f, exists in self.files_status.items() if not exists]
+                status = self.files_status_1 if url_index == 1 else self.files_status_2
+                missing_files = [f for f, exists in status.items() if not exists]
                 self.display_message([
                     "PARTIAL SUCCESS",
                     f"Missing: {missing_files[0]}",
@@ -449,15 +488,10 @@ class ESP32Flasher:
         return None, None
         
     def check_files(self):
-        """Check if all required flash files exist."""
-        self.files_status = {}
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        for file_type, filename in FLASH_FILES.items():
-            filepath = os.path.join(script_dir, filename)
-            self.files_status[file_type] = os.path.exists(filepath)
-            
-        return all(self.files_status.values())
+        """Check files in both slots."""
+        self.check_files_slot(1)
+        self.check_files_slot(2)
+        return self.all_files_ok(1) and self.all_files_ok(2)
     
     def get_status_display(self):
         """Get current status for display (page-aware)."""
@@ -465,12 +499,13 @@ class ESP32Flasher:
         
         if self.current_page == 1:
             # Show file status
-            all_files_ok = all(self.files_status.values())
+            self.check_files_slot(1)
+            all_files_ok = self.all_files_ok(1)
             if all_files_ok:
                 status_lines.append("Files: OK")
             else:
                 status_lines.append("Files: MISSING")
-                for file_type, exists in self.files_status.items():
+                for file_type, exists in self.files_status_1.items():
                     if not exists:
                         status_lines.append(f"  {file_type}: NO")
             
@@ -492,12 +527,16 @@ class ESP32Flasher:
             ])
         else:
             # Page 2: Network utilities
+            # Show file status for slot 2
+            self.check_files_slot(2)
+            all_files_ok_2 = self.all_files_ok(2)
+            status_lines.append("Files2: OK" if all_files_ok_2 else "Files2: MISSING")
             status_lines.extend([
                 "Page 2: Network",
                 "",
                 "KEY1: Start AP mode",
                 "KEY2: WiFi status",
-                "KEY3: Exit",
+                "KEY3: Flash fw2",
             ])
         
         return status_lines
@@ -578,8 +617,25 @@ class ESP32Flasher:
             print(f"WiFi status error: {e}")
             time.sleep(2)
     
-    def flash_esp32(self):
-        """Flash the ESP32 with the binary files."""
+    def download_then_flash_url2(self):
+        """Download firmware from URL 2 into slot 2, then flash from slot 2."""
+        try:
+            # Download URL2
+            self.download_firmware(url_index=2)
+            # After download attempt, if files are all present, flash
+            if self.all_files_ok(2):
+                self.display_message(["FLASHING", "From URL2 files"], color="WHITE", bg_color="ORANGE")
+                self.flash_esp32(slot_index=2)
+            else:
+                self.display_message(["CANNOT FLASH", "Files missing"], color="WHITE", bg_color="RED")
+                time.sleep(2)
+        except Exception as e:
+            self.display_message(["URL2 FLASH ERR", str(e)[:16]], color="WHITE", bg_color="RED")
+            print(f"download_then_flash_url2 error: {e}")
+            time.sleep(2)
+
+    def flash_esp32(self, slot_index=1):
+        """Flash the ESP32 with the binary files from a specific slot."""
         if self.flashing:
             return
             
@@ -587,7 +643,8 @@ class ESP32Flasher:
         
         try:
             # Check prerequisites
-            if not all(self.files_status.values()):
+            self.check_files_slot(slot_index)
+            if not self.all_files_ok(slot_index):
                 self.display_message(["Flash FAILED", "Missing files"], color="WHITE", bg_color="RED")
                 time.sleep(3)
                 return
@@ -612,7 +669,7 @@ class ESP32Flasher:
             self.display_progress(f"Starting {conn_type}", 0)
             
             # Build esptool command
-            script_dir = os.path.dirname(os.path.abspath(__file__))
+            slot_dir = self.get_slot_dir(slot_index)
             
             cmd = [
                 "esptool.py",
@@ -626,7 +683,7 @@ class ESP32Flasher:
             for file_type in ["bootloader", "partitions", "firmware"]:
                 address = FLASH_ADDRESSES[file_type]
                 filename = FLASH_FILES[file_type]
-                filepath = os.path.join(script_dir, filename)
+                filepath = os.path.join(slot_dir, filename)
                 cmd.extend([address, filepath])
             
             print(f"Executing: {' '.join(cmd)}")
@@ -637,7 +694,7 @@ class ESP32Flasher:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,
-                cwd=script_dir
+                cwd=self.script_dir
             )
             
             # Monitor progress with enhanced parsing
@@ -745,7 +802,7 @@ class ESP32Flasher:
                 if not GPIO.input(KEY1_PIN) and not self.flashing:
                     if self.current_page == 1:
                         print("KEY1 pressed, starting ESP32 flash.")
-                        flash_thread = threading.Thread(target=self.flash_esp32)
+                        flash_thread = threading.Thread(target=self.flash_esp32, args=(1,))
                         flash_thread.daemon = True
                         flash_thread.start()
                     else:
@@ -789,14 +846,11 @@ class ESP32Flasher:
                                 download_thread = threading.Thread(target=self.download_firmware, args=(2,))
                                 download_thread.daemon = True
                                 download_thread.start()
-                            elif self.current_page == 2:
-                                print("KEY3 pressed (Page 2), exiting program.")
-                                self.display_message(["Goodbye!", "Shutting down..."])
-                                time.sleep(1)
-                                if self.lcd:
-                                    self.lcd.LCD_Clear()
-                                GPIO.cleanup()
-                                sys.exit(0)
+                            elif self.current_page == 2 and not self.flashing:
+                                print("KEY3 pressed (Page 2), flash from fw2.")
+                                t = threading.Thread(target=self.flash_esp32, args=(2,))
+                                t.daemon = True
+                                t.start()
                         # Reset tracking
                     if self.key3_pressed_at is not None:
                         self.key3_pressed_at = None
