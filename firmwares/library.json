@@ -1,0 +1,54 @@
+{
+  "server_url": "https://blog.damienslab.com",
+  "selected_index": 0,
+  "firmwares": [
+    {
+      "name": "Slot 1 (fw1)",
+      "version": "legacy",
+      "folder": "fw1",
+      "path": "/home/yithanglee/Development/pi_camera/fw1",
+      "url": "",
+      "ready": true
+    },
+    {
+      "name": "Slot 2 (fw2)",
+      "version": "legacy",
+      "folder": "fw2",
+      "path": "/home/yithanglee/Development/pi_camera/fw2",
+      "url": "",
+      "ready": true
+    },
+    {
+      "name": "1.0.48",
+      "version": "1.0.48",
+      "folder": "1.0.48_v1.0.48",
+      "path": "/home/yithanglee/Development/pi_camera/firmwares/1.0.48_v1.0.48",
+      "url": "https://blog.damienslab.com/images/uploads/sketch_apr20a_48.ino.bin",
+      "ready": true
+    },
+    {
+      "name": "1.0.46",
+      "version": "1.0.46",
+      "folder": "1.0.46_v1.0.46",
+      "path": "/home/yithanglee/Development/pi_camera/firmwares/1.0.46_v1.0.46",
+      "url": "https://blog.damienslab.com/images/uploads/sketch_apr20a_46.ino.bin",
+      "ready": true
+    },
+    {
+      "name": "1.0.44",
+      "version": "1.0.44",
+      "folder": "1.0.44_v1.0.44",
+      "path": "/home/yithanglee/Development/pi_camera/firmwares/1.0.44_v1.0.44",
+      "url": "https://blog.damienslab.com/images/uploads/sketch_apr20a.ino.bin",
+      "ready": true
+    },
+    {
+      "name": "1.0.43",
+      "version": "1.0.43",
+      "folder": "1.0.43_v1.0.43",
+      "path": "/home/yithanglee/Development/pi_camera/firmwares/1.0.43_v1.0.43",
+      "url": "https://blog.damienslab.com/images/uploads/sketch_apr20a.ino.bin",
+      "ready": true
+    }
+  ]
+}

@@ -14,14 +14,18 @@ import LCD_Config
 import os
 import sys
 from captive_portal import CaptivePortal
+from firmware_manager import FirmwareManager
 
 # Pin definitions (same as camera app)
 KEY1_PIN = 21  # Button 1
 KEY2_PIN = 20  # Button 2
 KEY3_PIN = 16  # Button 3
 # Joystick/Navigation
+JOY_UP_PIN = 6     # Joystick Up
+JOY_DOWN_PIN = 19  # Joystick Down
 JOY_LEFT_PIN = 5   # Joystick Left
 JOY_RIGHT_PIN = 26 # Joystick Right
+JOY_PRESS_PIN = 13 # Joystick Press
 
 # ESP32 Control pins
 ESP32_EN_PIN = 4    # ESP32 EN (reset) - GPIO4
@@ -60,27 +64,14 @@ class ESP32Flasher:
         self.flash_progress = ""
         self.current_stage = ""
         self.current_percent = 0
-        self.current_page = 1  # 1 = main (flash/download), 2 = network utils
-        # No long-press behavior; navigation via joystick left/right
-        # Firmware URLs (both default to same; update URL_2 as needed)
-        self.FIRMWARE_URL_1 = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw9.ino.zip"
-        self.FIRMWARE_URL_2 = "https://jreporting.jimatlabs.com/uploads/vids/ino/sketch_apr20aw10.ino.zip"
-        # Directories
+        self.current_page = 1  # 1 = main (flasher/offline library), 2 = network & sync
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.SLOT_DIRS = {
-            1: os.path.join(self.script_dir, "fw1"),
-            2: os.path.join(self.script_dir, "fw2"),
-        }
-        # Per-slot file status
-        self.files_status_1 = {k: False for k in FLASH_FILES}
-        self.files_status_2 = {k: False for k in FLASH_FILES}
+        self.fw_mgr = FirmwareManager(self.script_dir)
         self.busy = False
         self.lcd_lock = threading.Lock()
         self.captive_portal = None
         self.setup_lcd()
         self.setup_gpio()
-        self.ensure_slot_dirs()
-        self.check_files()  # initialize statuses for both slots
         
     def setup_gpio(self):
         """Sets up GPIO pins for buttons and ESP32 control."""
@@ -90,6 +81,8 @@ class ESP32Flasher:
         GPIO.setup(KEY2_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(KEY3_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         # Joystick navigation pins
+        GPIO.setup(JOY_UP_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(JOY_DOWN_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(JOY_LEFT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(JOY_RIGHT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         
@@ -500,26 +493,59 @@ class ESP32Flasher:
         return None, None
         
     def check_files(self):
-        """Check files in both slots."""
-        self.check_files_slot(1)
-        self.check_files_slot(2)
-        return self.all_files_ok(1) and self.all_files_ok(2)
-    
+        """Refresh offline firmware catalog."""
+        self.fw_mgr.load_library()
+        return len(self.fw_mgr.firmwares) > 0
+
+    def sync_firmwares(self):
+        """Sync all firmwares from blog.damienslab.com for 100% offline storage."""
+        if self.busy or self.flashing:
+            return
+        self.busy = True
+        try:
+            self.display_message(["SYNC FIRMWARES", "Connecting...", "blog.damienslab"], color="WHITE", bg_color="ORANGE")
+
+            def on_progress(stage, cur, total, pct):
+                self.display_progress(f"{stage} [{cur}/{total}]", pct)
+
+            result = self.fw_mgr.sync_all(progress_callback=on_progress)
+            if result.get("success"):
+                count = result.get("count", 0)
+                self.display_message([
+                    "SYNC SUCCESS!",
+                    f"{count} Firmwares",
+                    "Cached offline",
+                    "Ready to flash"
+                ], color="WHITE", bg_color="GREEN")
+                time.sleep(3)
+            else:
+                msg = result.get("message", "Sync failed")
+                self.display_message(["SYNC FAILED", msg[:16], "Check network"], color="WHITE", bg_color="RED")
+                time.sleep(3)
+        except Exception as e:
+            self.display_message(["SYNC ERROR", str(e)[:16]], color="WHITE", bg_color="RED")
+            print(f"Sync error: {e}")
+            time.sleep(3)
+        finally:
+            self.busy = False
+            self.display_message(self.get_status_display())
+
     def get_status_display(self):
         """Get current status for display (page-aware)."""
-        status_lines = ["ESP32 Flasher Enhanced"]
+        status_lines = ["ESP32 Flasher"]
         
         if self.current_page == 1:
-            # Show file status
-            self.check_files_slot(1)
-            all_files_ok = self.all_files_ok(1)
-            if all_files_ok:
-                status_lines.append("Files: OK")
+            fw = self.fw_mgr.get_selected()
+            total_fws = len(self.fw_mgr.firmwares)
+            cur_idx = (self.fw_mgr.selected_index + 1) if total_fws > 0 else 0
+            
+            status_lines.append(f"FW [{cur_idx}/{total_fws}]")
+            if fw:
+                status_lines.append(f"{fw.get('name', 'N/A')[:16]}")
+                status_lines.append(f"v{fw.get('version', '')[:8]} - {'RDY' if fw.get('ready') else 'NOT RDY'}")
             else:
-                status_lines.append("Files: MISSING")
-                for file_type, exists in self.files_status_1.items():
-                    if not exists:
-                        status_lines.append(f"  {file_type}: NO")
+                status_lines.append("No Offline FW")
+                status_lines.append("Press K3 to Sync")
             
             # Show connection status
             port, conn_type = self.detect_esp32_port()
@@ -527,23 +553,16 @@ class ESP32Flasher:
                 port_short = port.split('/')[-1]
                 status_lines.append(f"{conn_type}: {port_short}")
             else:
-                status_lines.append("No ESP32 found")
+                status_lines.append("ESP32: Not found")
             
             # Controls (Page 1)
             status_lines.extend([
-                "",
-                "KEY1: Flash ESP32",
-                "KEY2: Download FW1",
-                "KEY3: Download FW2",
-                "LEFT/RIGHT: Switch page"
+                "----------------",
+                "K1:Flash K2:Next",
+                "K3:Sync  Joy:Up/Dn"
             ])
         else:
-            # Page 2: Network utilities
-            # Show file status for slot 2
-            self.check_files_slot(2)
-            all_files_ok_2 = self.all_files_ok(2)
-            status_lines.append("Files2: OK" if all_files_ok_2 else "Files2: MISSING")
-            
+            # Page 2: Network & Utilities
             ap_active = self.is_ap_mode_active()
             if ap_active:
                 ip = self.get_ap_ip()
@@ -556,10 +575,11 @@ class ESP32Flasher:
             status_lines.extend([
                 "Page 2: Network",
                 ap_status,
-                "",
+                f"Offline FW: {len(self.fw_mgr.firmwares)}",
+                "----------------",
                 key1_action,
                 "KEY2: WiFi status",
-                "KEY3: Flash fw2",
+                "KEY3: Sync Firmwares",
                 "LEFT/RIGHT: Page",
             ])
         
@@ -757,7 +777,7 @@ class ESP32Flasher:
             # Start Captive Portal web server on port 80 & DNS
             try:
                 if not self.captive_portal:
-                    self.captive_portal = CaptivePortal(on_connected=self.on_portal_wifi_connected)
+                    self.captive_portal = CaptivePortal(on_connected=self.on_portal_wifi_connected, fw_mgr=self.fw_mgr)
                 self.captive_portal.start()
             except Exception as e:
                 print(f"Captive portal launch error: {e}")
@@ -880,18 +900,23 @@ class ESP32Flasher:
             print(f"download_then_flash_url2 error: {e}")
             time.sleep(2)
 
-    def flash_esp32(self, slot_index=1):
-        """Flash the ESP32 with the binary files from a specific slot."""
-        if self.flashing:
+    def flash_esp32(self, fw_item=None):
+        """Flash the ESP32 with the binary files from selected firmware."""
+        if self.flashing or self.busy:
             return
             
         self.flashing = True
         
         try:
-            # Check prerequisites
-            self.check_files_slot(slot_index)
-            if not self.all_files_ok(slot_index):
-                self.display_message(["Flash FAILED", "Missing files"], color="WHITE", bg_color="RED")
+            target = fw_item or self.fw_mgr.get_selected()
+            if not target:
+                self.display_message(["Flash FAILED", "No FW selected", "Sync firmwares first"], color="WHITE", bg_color="RED")
+                time.sleep(3)
+                return
+
+            targets = self.fw_mgr.get_flash_targets(target)
+            if not targets:
+                self.display_message(["Flash FAILED", "Missing files", f"in {target.get('name', '')[:12]}"], color="WHITE", bg_color="RED")
                 time.sleep(3)
                 return
                 
@@ -912,11 +937,9 @@ class ESP32Flasher:
             # Initialize progress
             self.current_stage = "Starting"
             self.current_percent = 0
-            self.display_progress(f"Starting {conn_type}", 0)
+            self.display_progress(f"Flash {target.get('name', '')[:10]}", 0)
             
             # Build esptool command
-            slot_dir = self.get_slot_dir(slot_index)
-            
             cmd = [
                 "esptool.py",
                 "--chip", ESP32_CHIP,
@@ -926,11 +949,8 @@ class ESP32Flasher:
             ]
             
             # Add each file with its address
-            for file_type in ["bootloader", "partitions", "firmware"]:
-                address = FLASH_ADDRESSES[file_type]
-                filename = FLASH_FILES[file_type]
-                filepath = os.path.join(slot_dir, filename)
-                cmd.extend([address, filepath])
+            for addr, filepath in targets:
+                cmd.extend([addr, filepath])
             
             print(f"Executing: {' '.join(cmd)}")
             
@@ -1047,8 +1067,8 @@ class ESP32Flasher:
                 # KEY1 actions
                 if not GPIO.input(KEY1_PIN) and not self.flashing and not self.busy:
                     if self.current_page == 1:
-                        print("KEY1 pressed, starting ESP32 flash.")
-                        flash_thread = threading.Thread(target=self.flash_esp32, args=(1,))
+                        print("KEY1 pressed, starting ESP32 flash with selected firmware.")
+                        flash_thread = threading.Thread(target=self.flash_esp32)
                         flash_thread.daemon = True
                         flash_thread.start()
                     else:
@@ -1061,10 +1081,10 @@ class ESP32Flasher:
                 # KEY2 actions
                 if not GPIO.input(KEY2_PIN) and not self.flashing and not self.busy:
                     if self.current_page == 1:
-                        print("KEY2 pressed, downloading firmware URL 1.")
-                        download_thread = threading.Thread(target=self.download_firmware, args=(1,))
-                        download_thread.daemon = True
-                        download_thread.start()
+                        print("KEY2 pressed, selecting next firmware.")
+                        self.fw_mgr.next_firmware()
+                        self.display_message(self.get_status_display())
+                        last_display_update = time.time()
                     else:
                         print("KEY2 pressed (Page 2), showing WiFi status.")
                         wifi_thread = threading.Thread(target=self.show_wifi_status)
@@ -1072,19 +1092,28 @@ class ESP32Flasher:
                         wifi_thread.start()
                     time.sleep(0.3)  # Debounce
                 
-                # KEY3 action (no long-press): Page 1 download URL2, Page 2 flash fw2
+                # KEY3 actions: Sync firmwares
                 if not GPIO.input(KEY3_PIN) and not self.flashing and not self.busy:
-                    if self.current_page == 1:
-                        print("KEY3 pressed, downloading firmware URL 2.")
-                        download_thread = threading.Thread(target=self.download_firmware, args=(2,))
-                        download_thread.daemon = True
-                        download_thread.start()
-                    else:
-                        print("KEY3 pressed (Page 2), flash from fw2.")
-                        t = threading.Thread(target=self.flash_esp32, args=(2,))
-                        t.daemon = True
-                        t.start()
+                    print("KEY3 pressed, syncing all firmwares from blog.damienslab.com.")
+                    sync_thread = threading.Thread(target=self.sync_firmwares)
+                    sync_thread.daemon = True
+                    sync_thread.start()
                     time.sleep(0.3)  # Debounce
+
+                # JOYSTICK UP / DOWN: Cycle firmware selection
+                if not GPIO.input(JOY_UP_PIN) and not self.flashing and not self.busy:
+                    self.fw_mgr.prev_firmware()
+                    print(f"Joy UP: Selected {self.fw_mgr.get_selected()}")
+                    self.display_message(self.get_status_display())
+                    last_display_update = time.time()
+                    time.sleep(0.25)
+                
+                if not GPIO.input(JOY_DOWN_PIN) and not self.flashing and not self.busy:
+                    self.fw_mgr.next_firmware()
+                    print(f"Joy DOWN: Selected {self.fw_mgr.get_selected()}")
+                    self.display_message(self.get_status_display())
+                    last_display_update = time.time()
+                    time.sleep(0.25)
 
                 # LEFT/RIGHT navigation
                 if not GPIO.input(JOY_LEFT_PIN) and not self.flashing and not self.busy:

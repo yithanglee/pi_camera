@@ -253,6 +253,14 @@ HTML_PAGE = """<!DOCTYPE html>
     </form>
 
     <div class="alert" id="statusAlert"></div>
+
+    <div style="margin-top: 24px; border-top: 1px solid var(--border); padding-top: 18px;">
+      <div class="section-title">
+        <span>Offline Firmwares</span>
+        <button class="btn-refresh" id="btnSyncFw" onclick="syncFirmwares()">⚡ Sync All</button>
+      </div>
+      <div id="fwList" style="margin-bottom: 12px; font-size: 0.85rem; color: var(--text-muted);">Loading firmwares...</div>
+    </div>
   </div>
 
   <script>
@@ -352,8 +360,66 @@ HTML_PAGE = """<!DOCTYPE html>
       return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     }
 
-    // Initial scan on load
-    window.onload = scanWifi;
+    function loadFirmwares() {
+      fetch('/api/firmwares')
+        .then(r => r.json())
+        .then(data => {
+          const list = document.getElementById('fwList');
+          if (!data.firmwares || data.firmwares.length === 0) {
+            list.innerHTML = '<div style="padding:10px; text-align:center; background:rgba(15,23,42,0.4); border-radius:8px;">No firmwares stored offline yet.<br><small style="color:var(--text-muted);">Connect Wi-Fi and tap "Sync All" above.</small></div>';
+            return;
+          }
+          let html = '<div style="display:flex; flex-direction:column; gap:8px;">';
+          data.firmwares.forEach((fw, i) => {
+            const isSel = i === data.selected_index;
+            const statusColor = fw.ready ? 'var(--success)' : 'var(--danger)';
+            const statusText = fw.ready ? '● Ready to Flash' : '○ Incomplete';
+            html += `
+              <div style="padding:10px 12px; background:rgba(15,23,42,0.6); border:1px solid ${isSel ? 'var(--accent)' : 'var(--border)'}; border-radius:8px; display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                  <div style="font-weight:600; font-size:0.9rem; color:var(--text);">${escapeHtml(fw.name)} ${isSel ? '<span style="font-size:0.7rem; color:var(--accent); background:rgba(56,189,248,0.15); padding:2px 6px; border-radius:99px; margin-left:4px;">ACTIVE</span>' : ''}</div>
+                  <div style="font-size:0.75rem; color:var(--text-muted);">Version: ${escapeHtml(fw.version)}</div>
+                </div>
+                <div style="font-size:0.75rem; color:${statusColor}; font-weight:600;">${statusText}</div>
+              </div>
+            `;
+          });
+          html += '</div>';
+          list.innerHTML = html;
+        })
+        .catch(e => {
+          document.getElementById('fwList').innerHTML = '<div style="color:var(--text-muted);">Firmware catalog offline.</div>';
+        });
+    }
+
+    function syncFirmwares() {
+      const btn = document.getElementById('btnSyncFw');
+      btn.textContent = 'Syncing...';
+      btn.disabled = true;
+      fetch('/api/sync', { method: 'POST' })
+        .then(r => r.json())
+        .then(res => {
+          btn.textContent = '⚡ Sync All';
+          btn.disabled = false;
+          if (res.success) {
+            alert('Downloaded ' + res.count + ' firmware(s) successfully for offline use!');
+            loadFirmwares();
+          } else {
+            alert('Sync failed: ' + (res.message || res.error || 'Network error'));
+          }
+        })
+        .catch(err => {
+          btn.textContent = '⚡ Sync All';
+          btn.disabled = false;
+          alert('Sync error: ' + err);
+        });
+    }
+
+    // Initial scan and firmware load
+    window.onload = function() {
+      scanWifi();
+      loadFirmwares();
+    };
   </script>
 </body>
 </html>
@@ -458,6 +524,8 @@ class CaptiveHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if path.startswith("/api/scan"):
             self.handle_scan()
+        elif path.startswith("/api/firmwares"):
+            self.handle_firmwares()
         elif path == "/" or path.startswith("/index.html") or path.startswith("/wifi"):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -483,9 +551,37 @@ class CaptiveHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             ssid = data.get("ssid", "").strip()
             password = data.get("password", "").strip()
             self.handle_connect(ssid, password)
+        elif self.path.startswith("/api/sync"):
+            self.handle_sync()
         else:
             self.send_response(404)
             self.end_headers()
+
+    def handle_firmwares(self):
+        """Return catalog of locally downloaded offline firmwares."""
+        fw_mgr = getattr(self.server, "fw_mgr", None)
+        if fw_mgr:
+            data = {
+                "firmwares": fw_mgr.firmwares,
+                "selected_index": fw_mgr.selected_index,
+                "server_url": fw_mgr.server_url
+            }
+        else:
+            data = {"firmwares": [], "selected_index": 0}
+        self._send_json(data)
+
+    def handle_sync(self):
+        """Trigger sync and offline caching of firmwares from server."""
+        fw_mgr = getattr(self.server, "fw_mgr", None)
+        if not fw_mgr:
+            self._send_json({"success": False, "error": "Firmware manager not attached"})
+            return
+
+        try:
+            res = fw_mgr.sync_all()
+            self._send_json(res)
+        except Exception as e:
+            self._send_json({"success": False, "error": str(e)})
 
     def handle_scan(self):
         """Scan nearby Wi-Fi networks using nmcli."""
@@ -579,10 +675,11 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 class CaptivePortal:
     """Manager for Captive Portal HTTP and DNS services."""
-    def __init__(self, on_connected=None, port=80, ip="10.42.0.1"):
+    def __init__(self, on_connected=None, port=80, ip="10.42.0.1", fw_mgr=None):
         self.on_connected = on_connected
         self.port = port
         self.ip = ip
+        self.fw_mgr = fw_mgr
         self.http_server = None
         self.dns_server = None
         self.http_thread = None
@@ -601,6 +698,7 @@ class CaptivePortal:
         try:
             self.http_server = ThreadingHTTPServer(("0.0.0.0", self.port), CaptiveHTTPRequestHandler)
             self.http_server.on_connected_callback = self.on_connected
+            self.http_server.fw_mgr = self.fw_mgr
             self.http_thread = threading.Thread(target=self.http_server.serve_forever, daemon=True)
             self.http_thread.start()
             self.is_running = True
