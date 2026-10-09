@@ -13,6 +13,7 @@ import LCD_1in44
 import LCD_Config
 import os
 import sys
+from captive_portal import CaptivePortal
 
 # Pin definitions (same as camera app)
 KEY1_PIN = 21  # Button 1
@@ -75,6 +76,7 @@ class ESP32Flasher:
         self.files_status_2 = {k: False for k in FLASH_FILES}
         self.busy = False
         self.lcd_lock = threading.Lock()
+        self.captive_portal = None
         self.setup_lcd()
         self.setup_gpio()
         self.ensure_slot_dirs()
@@ -563,6 +565,13 @@ class ESP32Flasher:
         
         return status_lines
 
+    def on_portal_wifi_connected(self, ssid, new_ip):
+        """Callback when user successfully connects Wi-Fi via captive portal."""
+        print(f"Wi-Fi connected via captive portal: {ssid} ({new_ip})")
+        self.display_message(["PORTAL SETUP", f"Connected: {ssid[:10]}", f"IP: {new_ip[:12]}"], color="WHITE", bg_color="GREEN")
+        time.sleep(2)
+        self.stop_ap_mode()
+
     def is_ap_mode_active(self):
         """Check if AP mode is currently active on wlan0."""
         try:
@@ -575,13 +584,6 @@ class ESP32Flasher:
                     name = line.split(":")[0]
                     if name in ["PiZero2-AP", "Hotspot"]:
                         return True
-        except Exception:
-            pass
-
-        try:
-            res = subprocess.run(["iw", "dev", "wlan0", "info"], capture_output=True, text=True, timeout=2)
-            if res.returncode == 0 and "type AP" in res.stdout:
-                return True
         except Exception:
             pass
 
@@ -605,22 +607,54 @@ class ESP32Flasher:
             return
         self.busy = True
         try:
-            self.display_message(["AP MODE", "Stopping AP...", "Reconnecting WiFi"], color="WHITE", bg_color="ORANGE")
-            # Deactivate hotspot connections
+            self.display_message(["AP MODE", "Stopping AP...", "Restoring WiFi"], color="WHITE", bg_color="ORANGE")
+            
+            # Stop Captive Portal if running
+            if self.captive_portal:
+                try:
+                    self.captive_portal.stop()
+                except Exception as e:
+                    print(f"Error stopping captive portal: {e}")
+                self.captive_portal = None
+
+            # Ensure hotspot does not autoconnect in the future
             for con in ["PiZero2-AP", "Hotspot"]:
-                subprocess.run(["nmcli", "con", "down", con], capture_output=True, text=True, timeout=5)
-            
-            # Disconnect and reconnect wlan0 device to trigger WiFi autoconnect
-            subprocess.run(["nmcli", "dev", "disconnect", "wlan0"], capture_output=True, text=True, timeout=5)
+                subprocess.run(["nmcli", "con", "mod", con, "connection.autoconnect", "no"], capture_output=True, timeout=5)
+                subprocess.run(["nmcli", "con", "down", con], capture_output=True, timeout=5)
+
+            # Explicitly return wlan0 to managed (station) mode
+            subprocess.run(["ip", "link", "set", "wlan0", "down"], capture_output=True, timeout=5)
+            subprocess.run(["iw", "dev", "wlan0", "set", "type", "managed"], capture_output=True, timeout=5)
+            subprocess.run(["ip", "link", "set", "wlan0", "up"], capture_output=True, timeout=5)
             time.sleep(1)
-            subprocess.run(["nmcli", "dev", "connect", "wlan0"], capture_output=True, text=True, timeout=5)
-            
-            # Reconnect known Wi-Fi profiles if available
-            for wifi_name in ["d4damien", "Home Wifi2", "mywifi"]:
-                subprocess.run(["nmcli", "con", "up", wifi_name], capture_output=True, text=True, timeout=5)
+
+            # Check for known saved station Wi-Fi networks (excluding AP profiles)
+            known_conns = []
+            res = subprocess.run(["nmcli", "-t", "-f", "NAME,TYPE", "con", "show"], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                for line in res.stdout.strip().splitlines():
+                    parts = line.split(":")
+                    if len(parts) >= 2 and "wireless" in parts[1]:
+                        if parts[0] not in ["PiZero2-AP", "Hotspot"]:
+                            known_conns.append(parts[0])
+
+            connected = False
+            for wifi_name in known_conns:
+                res_up = subprocess.run(["nmcli", "con", "up", wifi_name], capture_output=True, text=True, timeout=8)
+                if res_up.returncode == 0:
+                    connected = True
+                    break
+
+            if not connected:
+                # When no other Wi-Fi is available to connect, keep wlan0 disconnected in station mode.
+                # This ensures AP mode does NOT turn back on!
+                subprocess.run(["nmcli", "dev", "disconnect", "wlan0"], capture_output=True, timeout=5)
 
             time.sleep(1)
-            self.display_message(["AP MODE", "AP Stopped", "WiFi Restored"], color="WHITE", bg_color="GREEN")
+            if connected:
+                self.display_message(["AP MODE", "AP Stopped", "WiFi Connected"], color="WHITE", bg_color="GREEN")
+            else:
+                self.display_message(["AP MODE", "AP Stopped", "WiFi Idle (OFF)"], color="WHITE", bg_color="GREEN")
             time.sleep(2)
         except Exception as e:
             self.display_message(["AP STOP ERR", str(e)[:16]], color="WHITE", bg_color="RED")
@@ -717,6 +751,17 @@ class ESP32Flasher:
                     else:
                         print(f"Generic hotspot error: {res_gen.stderr}")
 
+            # Ensure hotspot does not autoconnect on its own
+            subprocess.run(["nmcli", "con", "mod", "PiZero2-AP", "connection.autoconnect", "no"], capture_output=True, timeout=5)
+
+            # Start Captive Portal web server on port 80 & DNS
+            try:
+                if not self.captive_portal:
+                    self.captive_portal = CaptivePortal(on_connected=self.on_portal_wifi_connected)
+                self.captive_portal.start()
+            except Exception as e:
+                print(f"Captive portal launch error: {e}")
+
             # 5. Verify AP state and display IP
             if success or self.is_ap_mode_active():
                 time.sleep(1)
@@ -725,7 +770,8 @@ class ESP32Flasher:
                     "AP MODE ACTIVE",
                     "SSID: PiZero2-AP",
                     "PWD: pizerow2AP",
-                    f"IP: {ip}"
+                    f"IP: {ip}",
+                    "Portal: Port 80"
                 ], color="WHITE", bg_color="GREEN")
                 time.sleep(3)
                 return
