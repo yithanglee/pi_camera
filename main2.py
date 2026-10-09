@@ -73,6 +73,8 @@ class ESP32Flasher:
         # Per-slot file status
         self.files_status_1 = {k: False for k in FLASH_FILES}
         self.files_status_2 = {k: False for k in FLASH_FILES}
+        self.busy = False
+        self.lcd_lock = threading.Lock()
         self.setup_lcd()
         self.setup_gpio()
         self.ensure_slot_dirs()
@@ -111,46 +113,47 @@ class ESP32Flasher:
             print("LCD not available:", " | ".join(lines))
             return
             
-        try:
-            image = Image.new("RGB", (self.lcd.width, self.lcd.height), bg_color)
-            draw = ImageDraw.Draw(image)
-            
+        with self.lcd_lock:
             try:
-                font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 11)
-            except IOError:
+                image = Image.new("RGB", (self.lcd.width, self.lcd.height), bg_color)
+                draw = ImageDraw.Draw(image)
+                
                 try:
-                    font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 11)
+                    font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 11)
                 except IOError:
-                    font = ImageFont.load_default()
-            
-            y_text = 8
-            for line in lines:
-                # Wrap long lines
-                if len(line) > 18:  # Approximate character limit for LCD width
-                    words = line.split(' ')
-                    current_line = ""
-                    for word in words:
-                        if len(current_line + word) < 18:
-                            current_line += word + " "
-                        else:
-                            if current_line:
-                                draw.text((2, y_text), current_line.strip(), font=font, fill=color)
-                                y_text += 14
-                            current_line = word + " "
-                    if current_line:
-                        draw.text((2, y_text), current_line.strip(), font=font, fill=color)
+                    try:
+                        font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 11)
+                    except IOError:
+                        font = ImageFont.load_default()
+                
+                y_text = 8
+                for line in lines:
+                    # Wrap long lines
+                    if len(line) > 18:  # Approximate character limit for LCD width
+                        words = line.split(' ')
+                        current_line = ""
+                        for word in words:
+                            if len(current_line + word) < 18:
+                                current_line += word + " "
+                            else:
+                                if current_line:
+                                    draw.text((2, y_text), current_line.strip(), font=font, fill=color)
+                                    y_text += 14
+                                current_line = word + " "
+                        if current_line:
+                            draw.text((2, y_text), current_line.strip(), font=font, fill=color)
+                            y_text += 14
+                    else:
+                        draw.text((2, y_text), line, font=font, fill=color)
                         y_text += 14
-                else:
-                    draw.text((2, y_text), line, font=font, fill=color)
-                    y_text += 14
-                    
-                # Prevent text from going off screen
-                if y_text > self.lcd.height - 14:
-                    break
-                    
-            self.lcd.LCD_ShowImage(image, 0, 0)
-        except Exception as e:
-            print(f"Display error: {e}")
+                        
+                    # Prevent text from going off screen
+                    if y_text > self.lcd.height - 14:
+                        break
+                        
+                self.lcd.LCD_ShowImage(image, 0, 0)
+            except Exception as e:
+                print(f"Display error: {e}")
     
     def display_progress(self, stage, percent, details=""):
         """Display progress with progress bar on LCD."""
@@ -158,52 +161,53 @@ class ESP32Flasher:
             print(f"Progress: {stage} {percent}% {details}")
             return
             
-        try:
-            image = Image.new("RGB", (self.lcd.width, self.lcd.height), "BLUE")
-            draw = ImageDraw.Draw(image)
-            
+        with self.lcd_lock:
             try:
-                font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 10)
-            except IOError:
-                try:
-                    font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 10)
-                except IOError:
-                    font = ImageFont.load_default()
-            
-            # Title
-            draw.text((2, 2), "ESP32 FLASHING", font=font, fill="WHITE")
-            
-            # Stage
-            stage_text = stage[:18]  # Truncate if too long
-            draw.text((2, 16), stage_text, font=font, fill="WHITE")
-            
-            # Progress percentage
-            draw.text((2, 30), f"{percent}%", font=font, fill="WHITE")
-            
-            # Progress bar
-            bar_x = 2
-            bar_y = 45
-            bar_width = self.lcd.width - 4
-            bar_height = 8
-            
-            # Background bar
-            draw.rectangle([bar_x, bar_y, bar_x + bar_width, bar_y + bar_height], 
-                          outline="WHITE", fill="DARKBLUE")
-            
-            # Progress fill
-            if percent > 0:
-                fill_width = int((bar_width - 2) * percent / 100)
-                draw.rectangle([bar_x + 1, bar_y + 1, bar_x + 1 + fill_width, bar_y + bar_height - 1], 
-                              fill="WHITE")
-            
-            # Details (if any)
-            if details:
-                details_text = details[:18]  # Truncate if too long
-                draw.text((2, 58), details_text, font=font, fill="WHITE")
+                image = Image.new("RGB", (self.lcd.width, self.lcd.height), "BLUE")
+                draw = ImageDraw.Draw(image)
                 
-            self.lcd.LCD_ShowImage(image, 0, 0)
-        except Exception as e:
-            print(f"Progress display error: {e}")
+                try:
+                    font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 10)
+                except IOError:
+                    try:
+                        font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 10)
+                    except IOError:
+                        font = ImageFont.load_default()
+                
+                # Title
+                draw.text((2, 2), "ESP32 FLASHING", font=font, fill="WHITE")
+                
+                # Stage
+                stage_text = stage[:18]  # Truncate if too long
+                draw.text((2, 16), stage_text, font=font, fill="WHITE")
+                
+                # Progress percentage
+                draw.text((2, 30), f"{percent}%", font=font, fill="WHITE")
+                
+                # Progress bar
+                bar_x = 2
+                bar_y = 45
+                bar_width = self.lcd.width - 4
+                bar_height = 8
+                
+                # Background bar
+                draw.rectangle([bar_x, bar_y, bar_x + bar_width, bar_y + bar_height], 
+                              outline="WHITE", fill="DARKBLUE")
+                
+                # Progress fill
+                if percent > 0:
+                    fill_width = int((bar_width - 2) * percent / 100)
+                    draw.rectangle([bar_x + 1, bar_y + 1, bar_x + 1 + fill_width, bar_y + bar_height - 1], 
+                                  fill="WHITE")
+                
+                # Details (if any)
+                if details:
+                    details_text = details[:18]  # Truncate if too long
+                    draw.text((2, 58), details_text, font=font, fill="WHITE")
+                    
+                self.lcd.LCD_ShowImage(image, 0, 0)
+            except Exception as e:
+                print(f"Progress display error: {e}")
     
     def esp32_enter_download_mode(self):
         """Put ESP32 into download mode for flashing."""
@@ -537,80 +541,266 @@ class ESP32Flasher:
             self.check_files_slot(2)
             all_files_ok_2 = self.all_files_ok(2)
             status_lines.append("Files2: OK" if all_files_ok_2 else "Files2: MISSING")
+            
+            ap_active = self.is_ap_mode_active()
+            if ap_active:
+                ip = self.get_ap_ip()
+                ap_status = f"AP: ON ({ip})"
+                key1_action = "KEY1: Stop AP"
+            else:
+                ap_status = "AP: OFF"
+                key1_action = "KEY1: Start AP"
+
             status_lines.extend([
                 "Page 2: Network",
+                ap_status,
                 "",
-                "KEY1: Start AP mode",
+                key1_action,
                 "KEY2: WiFi status",
                 "KEY3: Flash fw2",
-                "LEFT/RIGHT: Switch page",
+                "LEFT/RIGHT: Page",
             ])
         
         return status_lines
 
+    def is_ap_mode_active(self):
+        """Check if AP mode is currently active on wlan0."""
+        try:
+            res = subprocess.run(
+                ["nmcli", "-t", "-f", "NAME,TYPE", "con", "show", "--active"],
+                capture_output=True, text=True, timeout=2
+            )
+            if res.returncode == 0:
+                for line in res.stdout.strip().splitlines():
+                    name = line.split(":")[0]
+                    if name in ["PiZero2-AP", "Hotspot"]:
+                        return True
+        except Exception:
+            pass
+
+        try:
+            res = subprocess.run(["iw", "dev", "wlan0", "info"], capture_output=True, text=True, timeout=2)
+            if res.returncode == 0 and "type AP" in res.stdout:
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def get_ap_ip(self):
+        """Get IP address of wlan0."""
+        try:
+            res = subprocess.run(["ip", "-4", "-o", "addr", "show", "wlan0"], capture_output=True, text=True, timeout=2)
+            if res.returncode == 0 and res.stdout:
+                match = re.search(r"inet\s+([0-9.]+)", res.stdout)
+                if match:
+                    return match.group(1)
+        except Exception:
+            pass
+        return "10.42.0.1"
+
+    def stop_ap_mode(self):
+        """Stop Wi-Fi AP mode and reconnect to client Wi-Fi."""
+        if self.busy:
+            return
+        self.busy = True
+        try:
+            self.display_message(["AP MODE", "Stopping AP...", "Reconnecting WiFi"], color="WHITE", bg_color="ORANGE")
+            # Deactivate hotspot connections
+            for con in ["PiZero2-AP", "Hotspot"]:
+                subprocess.run(["nmcli", "con", "down", con], capture_output=True, text=True, timeout=5)
+            
+            # Disconnect and reconnect wlan0 device to trigger WiFi autoconnect
+            subprocess.run(["nmcli", "dev", "disconnect", "wlan0"], capture_output=True, text=True, timeout=5)
+            time.sleep(1)
+            subprocess.run(["nmcli", "dev", "connect", "wlan0"], capture_output=True, text=True, timeout=5)
+            
+            # Reconnect known Wi-Fi profiles if available
+            for wifi_name in ["d4damien", "Home Wifi2", "mywifi"]:
+                subprocess.run(["nmcli", "con", "up", wifi_name], capture_output=True, text=True, timeout=5)
+
+            time.sleep(1)
+            self.display_message(["AP MODE", "AP Stopped", "WiFi Restored"], color="WHITE", bg_color="GREEN")
+            time.sleep(2)
+        except Exception as e:
+            self.display_message(["AP STOP ERR", str(e)[:16]], color="WHITE", bg_color="RED")
+            print(f"Stop AP error: {e}")
+            time.sleep(2)
+        finally:
+            self.busy = False
+            self.display_message(self.get_status_display())
+
     def start_ap_mode(self):
-        """Attempt to start Wi-Fi AP mode on wlan0 using NetworkManager (nmcli)."""
+        """Toggle or start Wi-Fi AP mode on wlan0 using NetworkManager (nmcli)."""
+        if self.busy:
+            return
+            
+        # Toggle: if already active, stop it
+        if self.is_ap_mode_active():
+            self.stop_ap_mode()
+            return
+
+        self.busy = True
         try:
             self.display_message(["AP MODE", "Starting...", "SSID: PiZero2-AP"], color="WHITE", bg_color="ORANGE")
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            # Try nmcli hotspot
-            cmd = [
-                "nmcli", "dev", "wifi", "hotspot",
-                "ifname", "wlan0",
-                "ssid", "PiZero2-AP",
-                "password", "pizerow2AP"
-            ]
-            result = subprocess.run(cmd, cwd=script_dir, capture_output=True, text=True)
-            if result.returncode == 0:
-                self.display_message(["AP MODE", "Started", "SSID: PiZero2-AP"], color="WHITE", bg_color="GREEN")
-                time.sleep(2)
+            
+            # 1. Ensure NetworkManager is installed
+            nm_which = subprocess.run(["which", "nmcli"], capture_output=True, text=True)
+            if nm_which.returncode != 0 and not os.path.exists("/usr/bin/nmcli"):
+                self.display_message(["AP FAILED", "nmcli not found", "Install nmcli"], color="WHITE", bg_color="RED")
+                time.sleep(3)
                 return
-            # Fallback: try create_ap if available
+
+            # 2. Check and start NetworkManager service if needed
+            nm_check = subprocess.run(["systemctl", "is-active", "--quiet", "NetworkManager"], capture_output=True)
+            if nm_check.returncode != 0:
+                print("NetworkManager not active, starting service...")
+                self.display_message(["AP MODE", "Starting service", "NetworkManager..."], color="WHITE", bg_color="ORANGE")
+                start_cmd = ["systemctl", "start", "NetworkManager"]
+                if os.geteuid() != 0:
+                    start_cmd = ["sudo"] + start_cmd
+                subprocess.run(start_cmd, capture_output=True, timeout=10)
+                
+                # Wait for service to become active
+                started = False
+                for _ in range(6):
+                    time.sleep(0.5)
+                    if subprocess.run(["systemctl", "is-active", "--quiet", "NetworkManager"]).returncode == 0:
+                        started = True
+                        break
+                if not started:
+                    print("Failed to start NetworkManager service.")
+                    self.display_message(["AP FAILED", "NM service", "not running"], color="WHITE", bg_color="RED")
+                    time.sleep(3)
+                    return
+
+            # 3. Ensure wlan0 is managed
+            subprocess.run(["nmcli", "dev", "set", "wlan0", "managed", "yes"], capture_output=True, timeout=5)
+
+            # 4. Check if PiZero2-AP profile already exists
+            con_check = subprocess.run(["nmcli", "-t", "-f", "NAME", "con", "show"], capture_output=True, text=True, timeout=5)
+            existing_conns = con_check.stdout.splitlines() if con_check.returncode == 0 else []
+
+            success = False
+            if "PiZero2-AP" in existing_conns:
+                print("Profile PiZero2-AP exists, activating...")
+                res = subprocess.run(["nmcli", "con", "up", "PiZero2-AP"], capture_output=True, text=True, timeout=12)
+                if res.returncode == 0:
+                    success = True
+                else:
+                    print(f"nmcli con up failed: {res.stderr}. Recreating profile...")
+                    subprocess.run(["nmcli", "con", "delete", "PiZero2-AP"], capture_output=True, timeout=5)
+
+            if not success:
+                cmd = [
+                    "nmcli", "dev", "wifi", "hotspot",
+                    "ifname", "wlan0",
+                    "con-name", "PiZero2-AP",
+                    "ssid", "PiZero2-AP",
+                    "password", "pizerow2AP"
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                if res.returncode == 0:
+                    success = True
+                else:
+                    print(f"nmcli hotspot error: {res.stderr}")
+                    # Generic fallback without con-name
+                    cmd_gen = [
+                        "nmcli", "dev", "wifi", "hotspot",
+                        "ifname", "wlan0",
+                        "ssid", "PiZero2-AP",
+                        "password", "pizerow2AP"
+                    ]
+                    res_gen = subprocess.run(cmd_gen, capture_output=True, text=True, timeout=15)
+                    if res_gen.returncode == 0:
+                        success = True
+                    else:
+                        print(f"Generic hotspot error: {res_gen.stderr}")
+
+            # 5. Verify AP state and display IP
+            if success or self.is_ap_mode_active():
+                time.sleep(1)
+                ip = self.get_ap_ip()
+                self.display_message([
+                    "AP MODE ACTIVE",
+                    "SSID: PiZero2-AP",
+                    "PWD: pizerow2AP",
+                    f"IP: {ip}"
+                ], color="WHITE", bg_color="GREEN")
+                time.sleep(3)
+                return
+            
+            # Fallback: check create_ap
             cmd_check = subprocess.run(["which", "create_ap"], capture_output=True, text=True)
             if cmd_check.returncode == 0:
                 cmd2 = ["create_ap", "wlan0", "eth0", "PiZero2-AP", "pizerow2AP", "-n"]
-                result2 = subprocess.run(cmd2, capture_output=True, text=True)
+                if os.geteuid() != 0:
+                    cmd2 = ["sudo"] + cmd2
+                result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=15)
                 if result2.returncode == 0:
                     self.display_message(["AP MODE", "Started", "SSID: PiZero2-AP"], color="WHITE", bg_color="GREEN")
-                    time.sleep(2)
+                    time.sleep(3)
                     return
-            # If all failed
-            self.display_message(["AP FAILED", "Install nmcli", "or create_ap"], color="WHITE", bg_color="RED")
-            print(f"AP start failed. nmcli: {result.stderr}")
-            time.sleep(2)
+
+            self.display_message(["AP FAILED", "Hotspot failed", "Check nmcli logs"], color="WHITE", bg_color="RED")
+            time.sleep(3)
         except Exception as e:
             self.display_message(["AP ERROR", str(e)[:16]], color="WHITE", bg_color="RED")
             print(f"AP mode error: {e}")
-            time.sleep(2)
+            time.sleep(3)
+        finally:
+            self.busy = False
+            self.display_message(self.get_status_display())
 
     def show_wifi_status(self):
         """Display basic Wi-Fi status details."""
+        if self.busy:
+            return
+        self.busy = True
         try:
             ssid = ""
             ip4 = ""
             link = ""
-            # SSID
-            try:
-                out = subprocess.run(["iwgetid", "-r"], capture_output=True, text=True)
-                if out.returncode == 0:
-                    ssid = out.stdout.strip()
-            except Exception:
-                pass
-            # IP
-            try:
-                out = subprocess.run(["hostname", "-I"], capture_output=True, text=True)
-                if out.returncode == 0:
-                    ip4 = out.stdout.strip().split(" ")[0]
-            except Exception:
-                pass
-            # Link state
-            try:
-                out = subprocess.run(["iw", "dev", "wlan0", "link"], capture_output=True, text=True)
-                if out.returncode == 0:
-                    first_line = out.stdout.strip().splitlines()[0] if out.stdout else ""
-                    link = first_line[:18]
-            except Exception:
-                pass
+
+            ap_active = self.is_ap_mode_active()
+            if ap_active:
+                ssid = "PiZero2-AP (AP)"
+                ip4 = self.get_ap_ip()
+                link = "Mode: Hotspot"
+            else:
+                # SSID
+                try:
+                    out = subprocess.run(["iwgetid", "-r"], capture_output=True, text=True, timeout=2)
+                    if out.returncode == 0 and out.stdout.strip():
+                        ssid = out.stdout.strip()
+                    else:
+                        nm_out = subprocess.run(
+                            ["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"],
+                            capture_output=True, text=True, timeout=2
+                        )
+                        if nm_out.returncode == 0:
+                            for line in nm_out.stdout.splitlines():
+                                if line.startswith("yes:"):
+                                    ssid = line.split(":", 1)[1]
+                                    break
+                except Exception:
+                    pass
+                # IP
+                try:
+                    out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=2)
+                    if out.returncode == 0:
+                        ip4 = out.stdout.strip().split(" ")[0]
+                except Exception:
+                    pass
+                # Link state
+                try:
+                    out = subprocess.run(["iw", "dev", "wlan0", "link"], capture_output=True, text=True, timeout=2)
+                    if out.returncode == 0:
+                        first_line = out.stdout.strip().splitlines()[0] if out.stdout else ""
+                        link = first_line[:18]
+                except Exception:
+                    pass
+
             lines = [
                 "WiFi Status",
                 f"SSID: {ssid[:12] if ssid else 'N/A'}",
@@ -618,11 +808,14 @@ class ESP32Flasher:
                 link if link else ""
             ]
             self.display_message([l for l in lines if l], color="WHITE", bg_color="BLUE")
-            time.sleep(2)
+            time.sleep(3)
         except Exception as e:
             self.display_message(["WiFi Error", str(e)[:16]], color="WHITE", bg_color="RED")
             print(f"WiFi status error: {e}")
             time.sleep(2)
+        finally:
+            self.busy = False
+            self.display_message(self.get_status_display())
     
     def download_then_flash_url2(self):
         """Download firmware from URL 2 into slot 2, then flash from slot 2."""
@@ -798,29 +991,29 @@ class ESP32Flasher:
             try:
                 current_time = time.time()
                 
-                # Update display every 2 seconds when not flashing
-                if not self.flashing and (current_time - last_display_update > 2):
+                # Update display every 2 seconds when not flashing or busy
+                if not self.flashing and not self.busy and (current_time - last_display_update > 2):
                     self.check_files()  # Refresh file status
                     status_lines = self.get_status_display()
                     self.display_message(status_lines)
                     last_display_update = current_time
                 
                 # KEY1 actions
-                if not GPIO.input(KEY1_PIN) and not self.flashing:
+                if not GPIO.input(KEY1_PIN) and not self.flashing and not self.busy:
                     if self.current_page == 1:
                         print("KEY1 pressed, starting ESP32 flash.")
                         flash_thread = threading.Thread(target=self.flash_esp32, args=(1,))
                         flash_thread.daemon = True
                         flash_thread.start()
                     else:
-                        print("KEY1 pressed (Page 2), starting AP mode.")
+                        print("KEY1 pressed (Page 2), toggling AP mode.")
                         ap_thread = threading.Thread(target=self.start_ap_mode)
                         ap_thread.daemon = True
                         ap_thread.start()
                     time.sleep(0.3)  # Debounce
                 
                 # KEY2 actions
-                if not GPIO.input(KEY2_PIN) and not self.flashing:
+                if not GPIO.input(KEY2_PIN) and not self.flashing and not self.busy:
                     if self.current_page == 1:
                         print("KEY2 pressed, downloading firmware URL 1.")
                         download_thread = threading.Thread(target=self.download_firmware, args=(1,))
@@ -828,11 +1021,13 @@ class ESP32Flasher:
                         download_thread.start()
                     else:
                         print("KEY2 pressed (Page 2), showing WiFi status.")
-                        self.show_wifi_status()
+                        wifi_thread = threading.Thread(target=self.show_wifi_status)
+                        wifi_thread.daemon = True
+                        wifi_thread.start()
                     time.sleep(0.3)  # Debounce
                 
                 # KEY3 action (no long-press): Page 1 download URL2, Page 2 flash fw2
-                if not GPIO.input(KEY3_PIN) and not self.flashing:
+                if not GPIO.input(KEY3_PIN) and not self.flashing and not self.busy:
                     if self.current_page == 1:
                         print("KEY3 pressed, downloading firmware URL 2.")
                         download_thread = threading.Thread(target=self.download_firmware, args=(2,))
@@ -846,17 +1041,19 @@ class ESP32Flasher:
                     time.sleep(0.3)  # Debounce
 
                 # LEFT/RIGHT navigation
-                if not GPIO.input(JOY_LEFT_PIN):
+                if not GPIO.input(JOY_LEFT_PIN) and not self.flashing and not self.busy:
                     if self.current_page != 1:
                         self.current_page = 1
                         print("Navigation: LEFT -> Page 1")
                         self.display_message(self.get_status_display())
+                        last_display_update = time.time()
                         time.sleep(0.3)
-                if not GPIO.input(JOY_RIGHT_PIN):
+                if not GPIO.input(JOY_RIGHT_PIN) and not self.flashing and not self.busy:
                     if self.current_page != 2:
                         self.current_page = 2
                         print("Navigation: RIGHT -> Page 2")
                         self.display_message(self.get_status_display())
+                        last_display_update = time.time()
                         time.sleep(0.3)
                 
                 time.sleep(0.05)  # Polling delay
