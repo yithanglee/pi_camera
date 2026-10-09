@@ -472,24 +472,30 @@ class ESP32Flasher:
         finally:
             self.flashing = False
     
-    def detect_esp32_port(self):
+    def detect_esp32_port(self, silent=True):
         """Detect available ESP32 connection port and type."""
-        for port in ESP32_PORTS:
+        import glob
+        # 1. First, search for all active USB serial devices (/dev/ttyUSB*, /dev/ttyACM*)
+        usb_ports = sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
+        for port in usb_ports:
             if os.path.exists(port):
-                try:
-                    # Determine connection type
-                    if "ttyUSB" in port or "ttyACM" in port:
-                        conn_type = "USB"
-                    else:
-                        conn_type = "UART"
-                    
-                    print(f"Found ESP32 port: {port} ({conn_type})")
-                    return port, conn_type
-                except Exception as e:
-                    print(f"Port {port} exists but not accessible: {e}")
-                    continue
-        
-        print("No ESP32 ports found")
+                if not silent and getattr(self, "_last_port", None) != port:
+                    print(f"Found ESP32 port: {port} (USB)")
+                self._last_port = port
+                return port, "USB"
+
+        # 2. Check Raspberry Pi onboard UART pins (/dev/serial0, /dev/ttyAMA0)
+        # Note: /dev/serial0 is the Pi's internal Broadcom GPIO UART (pins 14/15)
+        # It always exists on Pi OS even when NO ESP32 is wired to the GPIO header!
+        uart_candidates = ["/dev/serial0", "/dev/ttyAMA0", "/dev/ttyS0"]
+        for port in uart_candidates:
+            if os.path.exists(port):
+                if not silent and getattr(self, "_last_port", None) != port:
+                    print(f"No USB device found. Detected Pi UART: {port}")
+                self._last_port = port
+                return port, "UART"
+
+        self._last_port = None
         return None, None
         
     def check_files(self):
@@ -548,10 +554,13 @@ class ESP32Flasher:
                 status_lines.append("Press K3 to Sync")
             
             # Show connection status
-            port, conn_type = self.detect_esp32_port()
-            if port:
+            port, conn_type = self.detect_esp32_port(silent=True)
+            if conn_type == "USB":
                 port_short = port.split('/')[-1]
-                status_lines.append(f"{conn_type}: {port_short}")
+                status_lines.append(f"USB: {port_short}")
+            elif conn_type == "UART":
+                status_lines.append("USB: Not plugged")
+                status_lines.append(f"UART: {port.split('/')[-1]}")
             else:
                 status_lines.append("ESP32: Not found")
             
@@ -921,7 +930,7 @@ class ESP32Flasher:
                 return
                 
             # Detect ESP32 port
-            port, conn_type = self.detect_esp32_port()
+            port, conn_type = self.detect_esp32_port(silent=False)
             if not port:
                 self.display_message(["Flash FAILED", "No ESP32 found", "Check connections"], color="WHITE", bg_color="RED")
                 time.sleep(3)
@@ -930,6 +939,13 @@ class ESP32Flasher:
             # Show detected connection
             port_name = port.split('/')[-1]
             print(f"Using {conn_type} connection: {port}")
+            if conn_type == "UART":
+                print("\n" + "="*56)
+                print("NOTE: No USB port (/dev/ttyUSB* or /dev/ttyACM*) was detected.")
+                print("If ESP32 is plugged in via USB:")
+                print(" 1. Check Pi Zero 2 W port: use the inner 'USB' port (not 'PWR IN').")
+                print(" 2. Ensure your micro-USB cable is a DATA cable, not charge-only.")
+                print("="*56 + "\n")
             
             # Put ESP32 into download mode
             self.esp32_enter_download_mode()

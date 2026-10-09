@@ -48,13 +48,16 @@ class FirmwareManager:
         self.firmwares = []
         if os.path.exists(self.library_file):
             try:
-                with open(self.library_file, "r") as f:
-                    data = json.load(f)
-                    self.firmwares = data.get("firmwares", [])
-                    self.selected_index = data.get("selected_index", 0)
-                    self.server_url = data.get("server_url", DEFAULT_SERVER_URL)
+                if os.path.getsize(self.library_file) > 0:
+                    with open(self.library_file, "r") as f:
+                        data = json.load(f)
+                        self.firmwares = data.get("firmwares", [])
+                        self.selected_index = data.get("selected_index", 0)
+                        self.server_url = data.get("server_url", DEFAULT_SERVER_URL)
+                else:
+                    print("[FWManager] library.json is empty, rebuilding catalog from disk...")
             except Exception as e:
-                print(f"[FWManager] Error reading library.json: {e}")
+                print(f"[FWManager] Error reading library.json: {e}, rebuilding from disk...")
 
         # Scan filesystem for existing folders (including legacy fw1, fw2)
         existing_folders = {fw.get("folder"): fw for fw in self.firmwares}
